@@ -36,7 +36,7 @@ install_stack() {
     mkdir -p "$INSTALL_DIR/models"
     
     # 1. Install Dependencies
-    sudo apt update && sudo apt install -y build-essential git cmake curl libssl-dev pkg-config libwebkit2gtk-4.0-dev
+    sudo apt update && sudo apt install -y build-essential git cmake curl libssl-dev pkg-config libwebkit2gtk-4.1-dev
     
     # 2. Install Rust
     if ! command -v cargo &> /dev/null; then
