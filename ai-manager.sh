@@ -19,13 +19,15 @@ show_menu() {
     echo -e "${BLUE}========================================"
     echo -e "   🤖 RUST-AI STACK MANAGER (UBUNTU)"
     echo -e "========================================${NC}"
-    echo "1) Full Automated Install (Novice Friendly)"
+    echo "1) Full Automated Install "
     echo "2) Start AI Stack (Manual)"
     echo "3) Stop AI Stack"
     echo "4) Enable Auto-Start on Boot (Systemd)"
     echo "5) Disable Auto-Start"
     echo "6) Check Status"
-    echo "7) Exit"
+    echo "----------------------------------------"
+    echo "7) Setup Web Search (Install SearXNG)"
+    echo "8) Exit"
     echo -n "Select an option: "
 }
 
@@ -57,6 +59,26 @@ install_stack() {
     
     echo -e "${GREEN}Installation Complete!${NC}"
     read -p "Press enter to return to menu..."
+}
+
+setup_web_search() {
+    echo "🌐 Setting up SearXNG for private web search..."
+    # We use Docker for SearXNG as it's the most stable way to run it on Ubuntu
+    if ! command -v docker &> /dev/null; then
+        sudo apt install -y docker.io docker-compose
+    fi
+    
+    # Run SearXNG
+    docker run -d -p 8081:8080 --name searxng \
+        -e "SEARXNG_SETTINGS_URL=https://raw.githubusercontent.com/searxng/searxng/master/utils/brand/searxng-settings.yml" \
+        searxng/searxng:latest
+        
+    echo -e "\033[0;32m✅ SearXNG is live at $SEARXNG_URL\033[0m"
+    echo "To connect AnythingLLM:"
+    echo "1. Open AnythingLLM > Workspace Settings > Agent Configuration."
+    echo "2. Select 'SearXNG' as the search provider."
+    echo "3. Enter Base URL: http://localhost:8081"
+    read -p "Press enter to continue..."
 }
 
 setup_systemd() {
@@ -110,7 +132,8 @@ while true; do
         4) setup_systemd ;;
         5) systemctl --user disable llamaedge.service memu.service && echo "Auto-start disabled." ;;
         6) systemctl --user status llamaedge.service memu.service ;;
-        7) exit 0 ;;
+        7) setup_web_search ;;
+        8) exit 0 ;;
         *) echo "Invalid option." ;;
     esac
 done
