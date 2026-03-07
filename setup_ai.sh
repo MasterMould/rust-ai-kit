@@ -7,7 +7,7 @@ echo "🚀 Starting Rust-AI Stack Installation..."
 
 # 1. Update and Install System Dependencies
 sudo apt update && sudo apt install -y \
-    build-essential git cmake curl libssl-dev pkg-config
+    libwebkit2gtk-4.0-dev build-essential git cmake curl libssl-dev pkg-config wget libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
 
 # 2. Install Rust
 if ! command -v cargo &> /dev/null; then
