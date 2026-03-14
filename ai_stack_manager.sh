@@ -493,6 +493,7 @@ disable_systemd() {
 setup_web_search() {
     STEP "SearXNG private web search"
     local DOCKER="docker"
+    local SEARXNG_CONFIG_DIR="$HOME/searxng-config"
 
     if ! command -v docker &>/dev/null; then
         INFO "Installing Docker…"
@@ -503,6 +504,21 @@ setup_web_search() {
         WARN "Added to docker group — re-login required. Using sudo for now."
         DOCKER="sudo docker"
     fi
+    command -v docker &>/dev/null && ! docker info &>/dev/null 2>&1 && DOCKER="sudo docker"
+
+    # Write settings.yml with JSON format enabled (required for API use).
+    # Without this SearXNG returns 403 on all format=json requests.
+    mkdir -p "$SEARXNG_CONFIG_DIR"
+    cat > "$SEARXNG_CONFIG_DIR/settings.yml" <<'SEARXNG_SETTINGS'
+use_default_settings: true
+search:
+  formats:
+    - html
+    - json
+server:
+  limiter: false
+SEARXNG_SETTINGS
+    INFO "SearXNG config written with JSON API enabled."
 
     $DOCKER rm -f searxng 2>/dev/null || true
 
@@ -510,15 +526,27 @@ setup_web_search() {
         --name searxng \
         --restart unless-stopped \
         -p "${SEARXNG_PORT}:8080" \
+        -v "$SEARXNG_CONFIG_DIR/settings.yml:/etc/searxng/settings.yml:ro" \
         -e "SEARXNG_BASE_URL=http://localhost:${SEARXNG_PORT}/" \
         searxng/searxng:latest
 
+    INFO "Waiting for SearXNG to be ready…"
     local up=false
     for i in $(seq 1 30); do
-        sleep 1; curl -sf "http://localhost:$SEARXNG_PORT" &>/dev/null && { up=true; break; }
+        sleep 1
+        curl -sf "http://localhost:$SEARXNG_PORT" &>/dev/null && { up=true; break; }
     done
-    $up && OK "SearXNG live → http://localhost:$SEARXNG_PORT" \
-           || WARN "SearXNG still starting — check: docker logs searxng"
+    if $up; then
+        OK "SearXNG live → http://localhost:$SEARXNG_PORT"
+        # Verify JSON works
+        if curl -sf "http://localhost:$SEARXNG_PORT/search?q=test&format=json" &>/dev/null; then
+            OK "JSON API working — search proxy can now query SearXNG"
+        else
+            WARN "JSON API not yet responding — wait 10s then re-run this option"
+        fi
+    else
+        WARN "SearXNG still starting — check: $DOCKER logs searxng"
+    fi
 
     echo ""
     echo -e "${W}  Connect to AnythingLLM:${N}"
