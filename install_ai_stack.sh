@@ -19,14 +19,12 @@ STEP() { echo -e "\n${W}${C}━━━  $*  ━━━${N}"; }
 # ── Paths ────────────────────────────────────────────────────────
 INSTALL_DIR="$HOME/ai_stack"
 MODEL_DIR="$INSTALL_DIR/models"
-MEMU_DIR="$INSTALL_DIR/memu"
 APPS_DIR="$HOME/Applications"
 
 # ── Versions / URLs ──────────────────────────────────────────────
 LLAMACPP_REPO="https://github.com/ggerganov/llama.cpp"
 LLAMACPP_DIR="$INSTALL_DIR/llama.cpp"
 LLAMACPP_BIN="$LLAMACPP_DIR/build/bin/llama-server"
-MEMU_REPO="https://github.com/NevaMind-AI/memU"
 ANYTHINGLLM_APPIMAGE_URL="https://cdn.anythingllm.com/latest/AnythingLLMDesktop-x86_64.AppImage"
 
 # ── Model choice ─────────────────────────────────────────────────
@@ -296,40 +294,83 @@ download_model() {
 }
 
 # ================================================================
-#  STEP 6 — MemU
+#  STEP 6 — Memory server (mem0 + ChromaDB + sentence-transformers)
 # ================================================================
-install_memu() {
-    STEP "6/7  MemU (optional memory layer)"
-    if [[ -f "$MEMU_DIR/target/release/memu" ]]; then
-        OK "MemU already built."
+install_memory_server() {
+    STEP "6/7  Memory server (mem0 · ChromaDB · sentence-transformers)"
+
+    local MEM_DIR="$INSTALL_DIR/memory_server"
+    local MEM_VENV="$MEM_DIR/.venv"
+    local MEM_SCRIPT="$MEM_DIR/memory_server.py"
+    local MEM_MARKER="$MEM_DIR/.installed"
+
+    # Copy the server script from next to the installer
+    local SCRIPT_DIR
+    SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+
+    mkdir -p "$MEM_DIR"
+
+    # Skip if already installed
+    if [[ -f "$MEM_MARKER" && -f "$MEM_SCRIPT" ]]; then
+        OK "Memory server already installed."
         return
     fi
 
-    # Clone — if the repo doesn't exist or network fails, skip gracefully
-    if [[ -d "$MEMU_DIR/.git" ]]; then
-        git -C "$MEMU_DIR" pull --ff-only 2>/dev/null || true
+    # Copy memory_server.py
+    if [[ -f "$SCRIPT_DIR/memory_server.py" ]]; then
+        cp "$SCRIPT_DIR/memory_server.py" "$MEM_SCRIPT"
+        OK "Copied memory_server.py"
     else
-        if ! git clone "$MEMU_REPO" "$MEMU_DIR" 2>/dev/null; then
-            WARN "MemU repo not available (${MEMU_REPO})."
-            WARN "Skipping MemU — the stack will run without persistent memory."
-            WARN "You can add a memory layer later via AnythingLLM's built-in options."
-            return
-        fi
+        ERR "memory_server.py not found in $SCRIPT_DIR — ensure it's next to install_ai_stack.sh"
     fi
 
-    INFO "Building MemU…"
-    if cargo build --release --manifest-path "$MEMU_DIR/Cargo.toml" 2>&1; then
-        OK "MemU built."
-    else
-        WARN "MemU build failed — skipping. Stack will run without memory layer."
-    fi
+    # Python 3.10+ is fine — use system python3 (Ubuntu 24.04 ships 3.12)
+    INFO "Creating Python venv for memory server…"
+    python3 -m venv "$MEM_VENV"
+
+    INFO "Installing Python dependencies…"
+    "$MEM_VENV/bin/pip" install --upgrade pip 
+
+    INFO "Step 1/3 — web framework (fast)…"
+    "$MEM_VENV/bin/pip" install \
+        "fastapi" \
+        "uvicorn[standard]"
+
+    INFO "Step 2/3 — mem0ai + ChromaDB (slow, ~200 MB)…"
+    "$MEM_VENV/bin/pip" install \
+        "mem0ai" \
+        "chromadb"
+
+    INFO "Step 3/3 — sentence-transformers (slow, ~300 MB)…"
+    "$MEM_VENV/bin/pip" install \
+        "sentence-transformers" \
+        "huggingface-hub"
+
+    # Write a wrapper launch script
+    cat > "$MEM_DIR/start_memory_server.sh" <<MEMSTART
+#!/bin/bash
+# Memory server launcher — called by ai_stack_manager.sh
+source "$MEM_VENV/bin/activate"
+export LLAMA_BASE_URL="\${LLAMA_BASE_URL:-http://localhost:8080/v1}"
+export LLAMA_API_KEY="\${LLAMA_API_KEY:-local}"
+export LLAMA_MODEL="\${LLAMA_MODEL:-llama}"
+exec python3 "$MEM_SCRIPT"
+MEMSTART
+    chmod +x "$MEM_DIR/start_memory_server.sh"
+
+    touch "$MEM_MARKER"
+    OK "Memory server installed → $MEM_DIR"
+    INFO "First start will download the sentence-transformer model (~22 MB)."
 }
+install_memu() { install_memory_server; }   # alias so main() call still works
 
 # ================================================================
-#  STEP 7 — AnythingLLM
+#  STEP 7 — AnythingLLM + Search Proxy
 # ================================================================
 install_anythingllm() {
-    STEP "7/7  AnythingLLM"
+    STEP "7/7  AnythingLLM + Search Proxy"
+
+    # ── AnythingLLM ───────────────────────────────────────────────
     mkdir -p "$APPS_DIR"
     local ai="$APPS_DIR/AnythingLLM.AppImage"
     if [[ -f "$ai" ]]; then
@@ -350,6 +391,46 @@ DESK
         OK "AnythingLLM installed."
     else
         WARN "Skipped AnythingLLM."
+    fi
+
+    # ── Search proxy ──────────────────────────────────────────────
+    local PROXY_DIR="$INSTALL_DIR/search_proxy"
+    local PROXY_VENV="$PROXY_DIR/.venv"
+    local PROXY_SCRIPT="$PROXY_DIR/search_proxy.py"
+    local PROXY_MARKER="$PROXY_DIR/.installed"
+    local SCRIPT_DIR; SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+
+    mkdir -p "$PROXY_DIR"
+
+    if [[ -f "$PROXY_MARKER" ]]; then
+        OK "Search proxy already installed."
+    else
+        if [[ -f "$SCRIPT_DIR/search_proxy.py" ]]; then
+            cp "$SCRIPT_DIR/search_proxy.py" "$PROXY_SCRIPT"
+            OK "Copied search_proxy.py"
+        else
+            ERR "search_proxy.py not found in $SCRIPT_DIR"
+        fi
+
+        INFO "Creating search proxy venv…"
+        python3 -m venv "$PROXY_VENV"
+        INFO "Installing proxy dependencies (httpx, fastapi, uvicorn)…"
+        "$PROXY_VENV/bin/pip" install --upgrade pip
+        "$PROXY_VENV/bin/pip" install "httpx" "fastapi" "uvicorn[standard]"
+
+        # Launch script
+        cat > "$PROXY_DIR/start_search_proxy.sh" <<PROXYSTART
+#!/bin/bash
+export LLAMA_URL="\${LLAMA_URL:-http://localhost:8080}"
+export LLAMA_API_KEY="\${LLAMA_API_KEY:-local}"
+export SEARXNG_URL="\${SEARXNG_URL:-http://localhost:8081}"
+export PROXY_PORT="\${PROXY_PORT:-8090}"
+exec "$PROXY_VENV/bin/python" "$PROXY_SCRIPT"
+PROXYSTART
+        chmod +x "$PROXY_DIR/start_search_proxy.sh"
+        touch "$PROXY_MARKER"
+        OK "Search proxy installed — listens on :8090, forwards to llama-server :8080"
+        INFO "Point AnythingLLM at http://localhost:8090 (not 8080) to enable web search."
     fi
 }
 
@@ -414,7 +495,6 @@ export PATH="\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH"
 
 LLAMA_SERVER="$LLAMACPP_BIN"
 MODEL="$MODEL_PATH"
-MEMU="$MEMU_DIR/target/release/memu"
 LOGS="$INSTALL_DIR/logs"
 mkdir -p "\$LOGS"
 
@@ -427,6 +507,7 @@ echo "🤖 Starting AI Stack (Intel Arc A770 / llama.cpp SYCL)…"
     --n-gpu-layers 99 \\
     --port 8080 \\
     --host 0.0.0.0 \\
+    --api-key local \\
     > "\$LOGS/engine.log" 2>&1 &
 ENGINE_PID=\$!
 echo "  ⏳ Engine PID \$ENGINE_PID — waiting for API…"
@@ -440,12 +521,7 @@ curl -sf http://localhost:8080/v1/models >/dev/null 2>&1 \\
     && echo "  ✅ Engine ready." \\
     || { echo "  ❌ Engine failed — check \$LOGS/engine.log"; kill \$ENGINE_PID 2>/dev/null; exit 1; }
 
-# MemU
-"\$MEMU" --api-url http://localhost:8080 > "\$LOGS/memu.log" 2>&1 &
-MEMU_PID=\$!
-echo "  ✅ MemU PID \$MEMU_PID"
-
-echo "\$ENGINE_PID \$MEMU_PID" > "$INSTALL_DIR/.pids"
+echo "\$ENGINE_PID" > "$INSTALL_DIR/.pids"
 
 # AnythingLLM
 command -v anythingllm &>/dev/null && { anythingllm &>/dev/null & echo "  ✅ AnythingLLM launched."; }
