@@ -1,0 +1,6 @@
+#!/home/first/rust-ai-kit/venv/bin/python3
+import sys
+from bandit.cli.main import main
+if __name__ == '__main__':
+    sys.argv[0] = sys.argv[0].removesuffix('.exe')
+    sys.exit(main())

@@ -118,6 +118,7 @@ show_menu() {
     echo ""
     echo -e "${W}  Models${N}"
     echo "  14) Model Manager  (download · switch · delete)"
+    echo "  15) LLM-Factory "
     echo ""
     echo "  0)  Exit"
     echo -e "${B}  ──────────────────────────────────────────────${N}"
@@ -977,6 +978,7 @@ main() {
             12) benchmark           ;;
             13) uninstall           ;;
             14) manage_models       ;;
+            15) streamlit run llm_factory_rustaikit.py ;;
             0)  echo "Bye!"; exit 0 ;;
             *)  WARN "Invalid option."; sleep 1 ;;
         esac
