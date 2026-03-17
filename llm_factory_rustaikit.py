@@ -201,18 +201,82 @@ def audit_log(user: str, action: str, details: str, success: bool = True):
 
 
 # ============================================================================
-# AUTHENTICATION
+# AUTHENTICATION — OS users via PAM, local JSON as fallback
 # ============================================================================
+#
+# Primary: python-pam authenticates against the Linux user database.
+#   Requires: pip install python-pam
+#   Requires: the process user is in the 'shadow' group so PAM can verify
+#             passwords.  The Makefile's `make setup` handles this.
+#   Role is determined by checking the user's OS groups:
+#     sudo / admin / wheel → ADMIN
+#     everyone else        → USER
+#
+# Fallback: if PAM is unavailable (e.g. dev machine, Windows), the app
+#   falls back to the local config/users.json exactly as before.
+
+import pwd as _pwd
+import grp as _grp
+
+def _os_user_exists(username: str) -> bool:
+    try:
+        _pwd.getpwnam(username)
+        return True
+    except KeyError:
+        return False
+
+def _os_user_role(username: str) -> str:
+    """admin if in sudo/admin/wheel group, else user."""
+    try:
+        user_groups = {g.gr_name for g in _grp.getgrall() if username in g.gr_mem}
+        # Also add primary group
+        pw = _pwd.getpwnam(username)
+        primary = _grp.getgrgid(pw.pw_gid).gr_name
+        user_groups.add(primary)
+        if user_groups & {"sudo", "admin", "wheel"}:
+            return SecurityLevel.ADMIN.value
+    except Exception:
+        pass
+    return SecurityLevel.USER.value
+
+def _pam_authenticate(username: str, password: str) -> bool:
+    """Try PAM authentication. Returns False (not raises) on any failure."""
+    try:
+        import pam  # python-pam
+        p = pam.pam()
+        return p.authenticate(username, password)
+    except ImportError:
+        return False
+    except Exception as e:
+        logger.warning(f"PAM error: {e}")
+        return False
+
+
 class AuthManager:
+
+    # ── PAM / OS path ─────────────────────────────────────────────────────────
+
     @staticmethod
-    def hash_password(pw: str) -> str:
+    def _try_pam(username: str, password: str) -> Tuple[bool, Optional[str]]:
+        """Authenticate against Linux system users via PAM."""
+        if not _os_user_exists(username):
+            return False, None
+        if _pam_authenticate(username, password):
+            role = _os_user_role(username)
+            return True, role
+        return False, None
+
+    # ── Local JSON fallback ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _hash(pw: str) -> str:
         return hashlib.sha256(f"{pw}llm_factory_salt_2024".encode()).hexdigest()
 
     @staticmethod
-    def load_users() -> Dict:
+    def _load_local() -> Dict:
         if not USERS_DB.exists():
             u = {"admin": {
-                "password": AuthManager.hash_password("admin123"),
+                "password": AuthManager._hash("admin123"),
                 "role": SecurityLevel.ADMIN.value,
                 "created": datetime.now().isoformat(),
             }}
@@ -221,17 +285,79 @@ class AuthManager:
         return json.loads(USERS_DB.read_text())
 
     @staticmethod
-    def authenticate(username: str, password: str) -> Tuple[bool, Optional[str]]:
-        users = AuthManager.load_users()
+    def _try_local(username: str, password: str) -> Tuple[bool, Optional[str]]:
+        users = AuthManager._load_local()
         if username not in users:
-            audit_log("SYSTEM", "LOGIN_FAILED", f"Unknown: {username}", False)
             return False, None
-        if users[username]["password"] == AuthManager.hash_password(password):
-            role = users[username]["role"]
-            audit_log(username, "LOGIN_SUCCESS", f"role={role}")
-            return True, role
-        audit_log(username, "LOGIN_FAILED", "Bad password", False)
+        if users[username]["password"] == AuthManager._hash(password):
+            return True, users[username]["role"]
         return False, None
+
+    # ── Public interface ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def authenticate(username: str, password: str) -> Tuple[bool, Optional[str]]:
+        """
+        Try PAM first (system users), fall back to local users.json.
+        Returns (success, role_string).
+        """
+        # 1. PAM — system users
+        ok, role = AuthManager._try_pam(username, password)
+        if ok:
+            audit_log(username, "LOGIN_SUCCESS", f"method=pam role={role}")
+            return True, role
+
+        # 2. Local JSON — fallback / dev mode
+        ok, role = AuthManager._try_local(username, password)
+        if ok:
+            audit_log(username, "LOGIN_SUCCESS", f"method=local role={role}")
+            return True, role
+
+        audit_log("SYSTEM", "LOGIN_FAILED", f"user={username}", False)
+        return False, None
+
+    @staticmethod
+    def pam_available() -> bool:
+        """Returns True when python-pam is installed and PAM is usable."""
+        try:
+            import pam  # noqa
+            return True
+        except ImportError:
+            return False
+
+    @staticmethod
+    def add_local_user(username: str, password: str, role: str = "user") -> bool:
+        """Add / update a user in the local JSON DB (admin task)."""
+        try:
+            users = AuthManager._load_local()
+            users[username] = {
+                "password": AuthManager._hash(password),
+                "role": role,
+                "created": datetime.now().isoformat(),
+            }
+            USERS_DB.write_text(json.dumps(users, indent=2))
+            return True
+        except Exception as e:
+            logger.error(f"add_local_user: {e}")
+            return False
+
+    @staticmethod
+    def list_local_users() -> List[Dict]:
+        users = AuthManager._load_local()
+        return [{"username": u, "role": d["role"], "created": d.get("created", "")}
+                for u, d in users.items()]
+
+    @staticmethod
+    def delete_local_user(username: str) -> bool:
+        try:
+            users = AuthManager._load_local()
+            if username in users:
+                del users[username]
+                USERS_DB.write_text(json.dumps(users, indent=2))
+                return True
+            return False
+        except Exception:
+            return False
 
 
 # ============================================================================
@@ -823,23 +949,51 @@ class InferenceClient:
     def chat(messages: List[Dict], use_proxy: bool = True,
              temperature: float = 0.7, max_tokens: int = 2048) -> Dict:
         """
-        use_proxy=True  → :8090 (search_proxy.py — adds SearXNG when intent detected)
-        use_proxy=False → :8080 (llama-server direct — no search overhead)
+        use_proxy=True  → try :8090 (search_proxy.py — adds SearXNG when intent detected)
+                          auto-falls back to :8080 if proxy is not running
+        use_proxy=False → :8080 direct (no search overhead)
+
+        Sets st.session_state._last_endpoint so the UI can show which port was used.
         """
-        base = PROXY_URL if use_proxy else ENGINE_URL
-        try:
-            r = requests.post(
-                f"{base}/v1/chat/completions",
-                json={"model": LLAMA_SERVER_MODEL, "messages": messages,
-                      "temperature": temperature, "max_tokens": max_tokens,
-                      "stream": False},
-                headers=InferenceClient._hdr(),
-                timeout=120,
-            )
-            r.raise_for_status()
-            return r.json()
-        except Exception as e:
-            return {"error": str(e)}
+        payload = {
+            "model": LLAMA_SERVER_MODEL, "messages": messages,
+            "temperature": temperature, "max_tokens": max_tokens,
+            "stream": False,
+        }
+        headers = InferenceClient._hdr()
+
+        endpoints: List[Tuple[str, str]] = []
+        if use_proxy:
+            endpoints.append((PROXY_URL, "proxy :8090"))
+        endpoints.append((ENGINE_URL, "engine :8080"))
+
+        last_err = ""
+        for base, label in endpoints:
+            try:
+                r = requests.post(
+                    f"{base}/v1/chat/completions",
+                    json=payload, headers=headers, timeout=120,
+                )
+                r.raise_for_status()
+                # Record which endpoint actually answered
+                try:
+                    st.session_state._last_endpoint = label
+                    if use_proxy and label != "proxy :8090":
+                        st.session_state._proxy_fallback = True
+                    else:
+                        st.session_state._proxy_fallback = False
+                except Exception:
+                    pass
+                return r.json()
+            except requests.exceptions.ConnectionError as e:
+                last_err = str(e)
+                logger.warning(f"InferenceClient: {label} unreachable, trying next")
+                continue
+            except Exception as e:
+                last_err = str(e)
+                break   # non-connection errors (4xx/5xx) — don't retry
+
+        return {"error": f"All endpoints failed. Last error: {last_err}"}
 
     @staticmethod
     def reply(response: Dict) -> str:
@@ -1007,7 +1161,10 @@ def show_login():
     st.title("🦀 LLM Factory — rust-ai-kit Edition")
     _, col, _ = st.columns([1, 2, 1])
     with col:
-        st.info("**Default credentials:** `admin` / `admin123`")
+        if AuthManager.pam_available():
+            st.info("🐧 **Sign in with your Linux system account**")
+        else:
+            st.info("🔑 **Local accounts active** — default: `admin` / `admin123`")
         with st.form("login"):
             u = st.text_input("Username")
             p = st.text_input("Password", type="password")
@@ -1131,7 +1288,7 @@ def main():
 
     tabs = st.tabs([
         "💬 Chat", "🦀 Stack", "🧠 Memory", "🤖 Models",
-        "📚 RAG", "💻 Code", "📊 Benchmark", "🛡️ Security", "📜 Logs",
+        "📚 RAG", "💻 Code", "📊 Benchmark", "🛡️ Security", "👥 Users", "📜 Logs",
     ])
     with tabs[0]: tab_chat(temperature, max_tokens)
     with tabs[1]: tab_stack()
@@ -1141,7 +1298,8 @@ def main():
     with tabs[5]: tab_code(temperature)
     with tabs[6]: tab_benchmark()
     with tabs[7]: tab_security()
-    with tabs[8]: tab_logs()
+    with tabs[8]: tab_users()
+    with tabs[9]: tab_logs()
 
 
 # ============================================================================
@@ -1219,6 +1377,13 @@ def tab_chat(temperature: float, max_tokens: int):
     c[3].info("🌐 Search ON" if st.session_state.get("search_enabled") and is_rak else "Search OFF")
     c[4].info("🧠 Memory ON" if st.session_state.get("mem_enabled") and is_rak else "Memory OFF")
 
+    # Warn if proxy was down and we fell back to direct engine
+    if st.session_state.get("_proxy_fallback"):
+        st.warning(
+            "⚠️ Search proxy (:8090) was unreachable — fell back to direct engine (:8080). "
+            "Web search is **disabled** for this message. Start the proxy from the Stack tab."
+        )
+
     if not st.session_state.chat_history:
         st.markdown(
             "<div style='text-align:center;padding:2rem;color:#888'>"
@@ -1227,35 +1392,25 @@ def tab_chat(temperature: float, max_tokens: int):
         )
     else:
         for msg in st.session_state.chat_history:
-            if msg["role"] == "user":
-                st.markdown(
-                    f'<div class="chat-message user-message">'
-                    f'<div class="chat-header">👤 You</div>{msg["content"]}</div>',
-                    unsafe_allow_html=True,
-                )
-            else:
-                badges = ""
-                if msg.get("mem"):  badges += '<span class="badge b-mem">🧠 mem0</span>'
-                if msg.get("rag"):  badges += '<span class="badge b-rag">📄 RAG</span>'
-                if msg.get("web"):  badges += '<span class="badge b-web">🌐 web</span>'
-                st.markdown(
-                    f'<div class="chat-message assistant-message">'
-                    f'<div class="chat-header">🤖 {active_name}</div>'
-                    f'{badges}{"<br>" if badges else ""}{msg["content"]}</div>',
-                    unsafe_allow_html=True,
-                )
+            role = msg["role"]
+            with st.chat_message(role, avatar="👤" if role == "user" else "🤖"):
+                # Render content as markdown — handles code blocks, lists, newlines etc.
+                st.markdown(msg["content"])
+                # Show augmentation badges below assistant messages
+                if role == "assistant":
+                    tags = []
+                    if msg.get("mem"): tags.append("🧠 mem0")
+                    if msg.get("rag"): tags.append("📄 RAG")
+                    if msg.get("web"): tags.append("🌐 web")
+                    if tags:
+                        st.caption("  ·  ".join(tags))
 
-    st.divider()
-    col_i, col_b = st.columns([5, 1])
-    with col_i:
-        user_input = st.text_area("", height=100, placeholder="Type your message…",
-                                  key="chat_input")
-    with col_b:
-        st.write("")
-        st.write("")
-        if st.button("📤 Send", type="primary") and user_input.strip():
-            _send(user_input, temperature, max_tokens)
-            st.rerun()
+    # st.chat_input stays pinned to the bottom of the page and handles
+    # Enter-to-send natively — no rerun key conflicts.
+    user_input = st.chat_input("Type your message…")
+    if user_input and user_input.strip():
+        _send(user_input, temperature, max_tokens)
+        st.rerun()
 
     st.divider()
     if st.button("📄 Export as Markdown") and st.session_state.chat_history:
@@ -1842,6 +1997,111 @@ def tab_security():
                 st.metric("Success rate", f"{(total - failures) / total * 100:.1f}%")
         else:
             st.info("No audit log yet.")
+
+
+# ============================================================================
+# TAB: USERS  (admin only)
+# ============================================================================
+def tab_users():
+    st.header("👥 User Management")
+
+    is_admin = st.session_state.get("role") == SecurityLevel.ADMIN.value
+    if not is_admin:
+        st.warning("🔒 Admin access required.")
+        return
+
+    # PAM status
+    pam_ok = AuthManager.pam_available()
+    if pam_ok:
+        st.success(
+            "✅ **PAM active** — users log in with their Linux system credentials.  \n"
+            "Any user account on this machine can log in. Role is determined by "
+            "OS group membership (`sudo`/`admin` → admin, everyone else → user)."
+        )
+    else:
+        st.warning(
+            "⚠️ **PAM unavailable** — falling back to local `config/users.json`.  \n"
+            "Install `python-pam` and ensure the process user is in the `shadow` group "
+            "to enable OS-level authentication.  \n"
+            "```bash\npip install python-pam\nsudo usermod -aG shadow $USER\n"
+            "# then log out and back in\n```"
+        )
+
+    st.divider()
+
+    # Show OS users who could log in (those with login shells)
+    if pam_ok:
+        st.subheader("🐧 OS users with login shells")
+        st.caption("These accounts can authenticate directly with their system password.")
+        try:
+            shell_users = []
+            for pw in _pwd.getpwall():
+                if (pw.pw_shell not in ("/bin/false", "/usr/sbin/nologin", "")
+                        and pw.pw_uid >= 1000):
+                    groups = [g.gr_name for g in _grp.getgrall() if pw.pw_name in g.gr_mem]
+                    role = "admin" if set(groups) & {"sudo", "admin", "wheel"} else "user"
+                    shell_users.append({
+                        "Username": pw.pw_name,
+                        "UID": pw.pw_uid,
+                        "Role in app": role,
+                        "OS Groups": ", ".join(sorted(groups)[:6]),
+                    })
+            if shell_users:
+                import pandas as pd
+                st.dataframe(pd.DataFrame(shell_users), use_container_width=True)
+            else:
+                st.info("No regular user accounts found.")
+        except Exception as e:
+            st.error(f"Could not enumerate users: {e}")
+
+    st.divider()
+
+    # Local JSON users (fallback accounts)
+    st.subheader("📋 Local fallback accounts  (`config/users.json`)")
+    st.caption(
+        "These are used when PAM is unavailable, or as override accounts "
+        "(e.g. a service account that has no OS login)."
+    )
+
+    local_users = AuthManager.list_local_users()
+    if local_users:
+        for u in local_users:
+            c1, c2, c3, c4 = st.columns([3, 2, 2, 1])
+            c1.write(f"**{u['username']}**")
+            c2.write(u["role"])
+            c3.caption(u["created"][:10] if u["created"] else "")
+            with c4:
+                if u["username"] != st.session_state.username:  # can't delete yourself
+                    if st.button("🗑️", key=f"delusr_{u['username']}"):
+                        if AuthManager.delete_local_user(u["username"]):
+                            st.success(f"Deleted {u['username']}")
+                            st.rerun()
+    else:
+        st.info("No local accounts.")
+
+    st.divider()
+
+    # Add local user
+    st.subheader("➕ Add local fallback account")
+    with st.form("add_user_form"):
+        new_u = st.text_input("Username")
+        new_p = st.text_input("Password", type="password")
+        new_p2 = st.text_input("Confirm password", type="password")
+        new_r = st.selectbox("Role", [SecurityLevel.USER.value, SecurityLevel.ADMIN.value])
+        if st.form_submit_button("Add user"):
+            if not new_u or not new_p:
+                st.error("Username and password required.")
+            elif new_p != new_p2:
+                st.error("Passwords do not match.")
+            elif len(new_p) < 8:
+                st.error("Password must be at least 8 characters.")
+            else:
+                if AuthManager.add_local_user(new_u, new_p, new_r):
+                    st.success(f"Added local account: {new_u} ({new_r})")
+                    audit_log(st.session_state.username, "USER_ADDED", new_u)
+                    st.rerun()
+                else:
+                    st.error("Failed to save user.")
 
 
 # ============================================================================

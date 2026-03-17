@@ -1,0 +1,18 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=rust-ai-kit LLM Factory
+GenericName=Local AI Assistant
+Comment=Start the rust-ai-kit stack and open the LLM Factory UI
+# Uses gnome-terminal so the user can see startup progress.
+# Falls back to xterm if gnome-terminal is not installed.
+Exec=bash -c 'if command -v gnome-terminal >/dev/null 2>&1; then gnome-terminal --title="🦀 rust-ai-kit Startup" -- bash -c "%k/../../launch.sh; exec bash"; else xterm -title "rust-ai-kit Startup" -e bash -c "%k/../../launch.sh; exec bash"; fi'
+# Icon: place a 128x128 PNG at the path below, or replace with any system icon name.
+# To use the default terminal icon until you add a custom one, use:
+Icon=utilities-terminal
+# Set Icon= to the full path of a custom icon, e.g.:
+# Icon=/home/USER/rust-ai-kit/assets/icon.png
+Terminal=false
+Categories=Science;Education;Utility;
+Keywords=AI;LLM;chat;llama;Intel;Arc;
+StartupNotify=true
