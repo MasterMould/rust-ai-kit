@@ -4,11 +4,12 @@ STREAMLIT  = $(VENV)/bin/streamlit
 APP        = llm_factory_rustaikit.py
 DESKTOP    = rust-ai-kit.desktop
 LAUNCH     = launch.sh
-DESKTOP_DIR = $(HOME)/.local/share/applications
+DESKTOP_DIR   = $(HOME)/.local/share/applications
 AUTOSTART_DIR = $(HOME)/.config/autostart
 
 # ================================================================
-#  setup  — install Python deps, add user to shadow group for PAM
+#  setup  — install Python deps, add user to shadow group for PAM,
+#            install desktop icon automatically
 # ================================================================
 setup:
 	@echo "▶  Updating apt and installing system packages…"
@@ -35,13 +36,21 @@ setup:
 	touch config/.gitkeep workspace/.gitkeep logs/.gitkeep
 	@echo "▶  Adding $$USER to shadow group (needed for PAM password verification)…"
 	sudo usermod -aG shadow $$USER
+	@echo "▶  Making scripts executable…"
+	chmod +x $(LAUNCH)
+	@echo "▶  Installing desktop icon…"
+	$(MAKE) install-desktop
 	@echo ""
 	@echo "  ✅  Setup complete."
 	@echo ""
 	@echo "  ⚠️  IMPORTANT: Log out and back in (or reboot) for the"
 	@echo "      shadow group change to take effect."
 	@echo ""
-	@echo "  Then run:  make run"
+	@echo "  Desktop icon installed — look for it in your app launcher."
+	@echo "  To also add it to your Desktop folder:"
+	@echo "    cp $(DESKTOP_DIR)/$(DESKTOP) ~/Desktop/ && chmod +x ~/Desktop/$(DESKTOP)"
+	@echo ""
+	@echo "  Then run:  make run   (or click the desktop icon)"
 
 # ================================================================
 #  run  — start Streamlit directly (stack must already be running)
@@ -61,29 +70,33 @@ launch:
 	bash $(LAUNCH)
 
 # ================================================================
-#  install-desktop  — install .desktop icon and make launch.sh executable
+#  install-desktop  — install .desktop icon to app launcher + Desktop
 # ================================================================
 install-desktop:
 	@echo "▶  Installing desktop icon…"
 	chmod +x $(LAUNCH)
 	mkdir -p $(DESKTOP_DIR)
-	@# Rewrite the Exec path to use absolute paths
+	@# Write the .desktop file with the real absolute path substituted in
 	@sed \
 	    -e "s|%k/../../launch.sh|$(CURDIR)/$(LAUNCH)|g" \
+	    -e "s|Exec=bash|Exec=bash|" \
 	    $(DESKTOP) > $(DESKTOP_DIR)/$(DESKTOP)
 	chmod +x $(DESKTOP_DIR)/$(DESKTOP)
-	@# Also validate the .desktop file if desktop-file-validate is present
+	@# Also put a copy on the Desktop if ~/Desktop exists
+	@if [ -d "$(HOME)/Desktop" ]; then \
+	    cp $(DESKTOP_DIR)/$(DESKTOP) $(HOME)/Desktop/$(DESKTOP); \
+	    chmod +x $(HOME)/Desktop/$(DESKTOP); \
+	    gio trust $(HOME)/Desktop/$(DESKTOP) 2>/dev/null || true; \
+	    echo "  ✅  Copied to ~/Desktop/$(DESKTOP) (trusted)"; \
+	fi
+	@# Validate if the tool is present
 	@command -v desktop-file-validate &>/dev/null && \
 	    desktop-file-validate $(DESKTOP_DIR)/$(DESKTOP) && \
 	    echo "  ✅  Desktop file validates OK" || true
-	@# Refresh the desktop database
+	@# Refresh the app launcher database
 	@command -v update-desktop-database &>/dev/null && \
 	    update-desktop-database $(DESKTOP_DIR) 2>/dev/null || true
-	@echo ""
-	@echo "  ✅  Desktop icon installed to $(DESKTOP_DIR)/$(DESKTOP)"
-	@echo "  You can also copy the .desktop file to your Desktop folder:"
-	@echo "  cp $(DESKTOP_DIR)/$(DESKTOP) ~/Desktop/"
-	@echo "  Right-click it → Allow Launching"
+	@echo "  ✅  Installed to $(DESKTOP_DIR)/$(DESKTOP)"
 
 # ================================================================
 #  install-autostart  — start the stack automatically on login

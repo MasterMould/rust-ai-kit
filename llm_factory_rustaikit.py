@@ -1334,15 +1334,31 @@ def _send(user_input: str, temperature: float, max_tokens: int):
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": sanitized})
 
+    # ── Pre-flight: check engine is reachable before touching history ──────────
+    if is_rak and not StackManager.engine_running():
+        st.session_state._engine_down = True
+        return   # tab_chat will show the actionable banner; nothing added to history
+
+    st.session_state._engine_down = False
+
     with st.spinner("🤔 Thinking…"):
         if is_rak:
             use_proxy = st.session_state.search_enabled
             resp  = InferenceClient.chat(messages, use_proxy, temperature, max_tokens)
+            # If both endpoints failed, surface as a UI error — not in chat history
+            if "error" in resp:
+                st.session_state._last_error = resp["error"]
+                st.session_state._engine_down = True
+                return
             reply = InferenceClient.reply(resp)
             web_used = use_proxy
         else:
+            if not OllamaClient.running():
+                st.session_state._engine_down = True
+                return
             reply = OllamaClient.chat(messages, st.session_state.ollama_model, temperature)
 
+    # Only write to history on success
     st.session_state.chat_history.append({"role": "user", "content": sanitized})
     st.session_state.chat_history.append({
         "role": "assistant", "content": reply,
@@ -1359,6 +1375,9 @@ def _send(user_input: str, temperature: float, max_tokens: int):
         except Exception:
             pass
 
+    # Clear any previous error state on success
+    st.session_state._engine_down = False
+    st.session_state.pop("_last_error", None)
     audit_log(username, "CHAT", f"backend={st.session_state.backend}")
 
 
@@ -1370,6 +1389,58 @@ def tab_chat(temperature: float, max_tokens: int):
                    if is_rak and ModelManager.get_active_path()
                    else st.session_state.ollama_model or "—")
 
+    # ── Engine health banner ──────────────────────────────────────────────────
+    if is_rak:
+        engine_ok = StackManager.engine_running()
+        proxy_ok  = StackManager.proxy_running()
+    else:
+        engine_ok = OllamaClient.running()
+        proxy_ok  = True  # not applicable
+
+    if not engine_ok:
+        st.error(
+            "🔴 **Engine offline** — llama-server is not running on "
+            f"`localhost:{ENGINE_PORT}`."
+        )
+        active = ModelManager.get_active_path() if is_rak else ""
+        if active:
+            c1, c2 = st.columns([2, 5])
+            with c1:
+                if st.button("▶️ Start engine now", type="primary"):
+                    gpu_layers = GPUDetector.gpu_layers()
+                    with st.spinner(
+                        f"Starting llama-server  (GPU layers={gpu_layers}, up to 90s)…"
+                    ):
+                        ok, msg = StackManager.start_engine(active, gpu_layers)
+                    if ok:
+                        st.success(msg)
+                        st.session_state._engine_down = False
+                        st.session_state.pop("_last_error", None)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                        st.caption(
+                            f"Check: `tail -f {STACK_LOG_DIR}/engine.log`  \n"
+                            "Common cause: not in `render` group — log out and back in."
+                        )
+            with c2:
+                st.caption(
+                    f"Model: `{Path(active).name}`  \n"
+                    "Or start the full stack from the **🦀 Stack** tab."
+                )
+        else:
+            st.warning("No model selected. Go to the **🤖 Models** tab to download one.")
+        # Show any diagnostic from the last failed attempt
+        if st.session_state.get("_last_error"):
+            with st.expander("🔍 Connection error detail"):
+                st.code(st.session_state["_last_error"])
+        # Still render history (read-only) but block input below
+        chat_input_disabled = True
+    else:
+        chat_input_disabled = False
+        st.session_state._engine_down = False
+
+    # ── Status strip ──────────────────────────────────────────────────────────
     c = st.columns(5)
     c[0].info(f"**Model:** {active_name[:30]}")
     c[1].info(f"**Backend:** {st.session_state.backend}")
@@ -1378,10 +1449,15 @@ def tab_chat(temperature: float, max_tokens: int):
     c[4].info("🧠 Memory ON" if st.session_state.get("mem_enabled") and is_rak else "Memory OFF")
 
     # Warn if proxy was down and we fell back to direct engine
-    if st.session_state.get("_proxy_fallback"):
+    if not chat_input_disabled and is_rak and not proxy_ok and st.session_state.get("search_enabled"):
         st.warning(
-            "⚠️ Search proxy (:8090) was unreachable — fell back to direct engine (:8080). "
-            "Web search is **disabled** for this message. Start the proxy from the Stack tab."
+            "⚠️ Search proxy (:8090) is offline — sending directly to engine (:8080). "
+            "Web search is **disabled**. Start the proxy from the **🦀 Stack** tab."
+        )
+    elif st.session_state.get("_proxy_fallback"):
+        st.warning(
+            "⚠️ Last message used direct engine (:8080) — proxy was unreachable. "
+            "Web search was disabled for that reply."
         )
 
     if not st.session_state.chat_history:
@@ -1407,8 +1483,9 @@ def tab_chat(temperature: float, max_tokens: int):
 
     # st.chat_input stays pinned to the bottom of the page and handles
     # Enter-to-send natively — no rerun key conflicts.
-    user_input = st.chat_input("Type your message…")
-    if user_input and user_input.strip():
+    placeholder = "Type your message…" if not chat_input_disabled else "⚠️ Engine offline — start it above first"
+    user_input = st.chat_input(placeholder, disabled=chat_input_disabled)
+    if user_input and user_input.strip() and not chat_input_disabled:
         _send(user_input, temperature, max_tokens)
         st.rerun()
 
@@ -1421,17 +1498,52 @@ def tab_chat(temperature: float, max_tokens: int):
                            file_name=f"chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md")
 
 
-# ============================================================================
-# TAB: STACK STATUS
-# ============================================================================
-def _svc(label: str, ok: bool, url: str, note: str = ""):
+# ── Per-service inline controls ───────────────────────────────────────────────
+
+def _svc(label: str, ok: bool, url: str, note: str = "",
+         start_fn=None, log_name: str = ""):
+    """
+    Render one service row.
+    When offline AND start_fn is provided, show an inline ▶️ Start button
+    and a collapsible log tail for instant diagnosis.
+    """
     icon  = "🟢" if ok else "🔴"
-    state = f"<span class='ok'>running</span>" if ok else "<span class='err'>offline</span>"
+    state_html = "<span class='ok'>running</span>" if ok else "<span class='err'>offline</span>"
     st.markdown(
-        f"{icon} **{label}** &ensp; <span class='mono'>{url}</span> &ensp; {state}"
+        f"{icon} **{label}** &ensp; <span class='mono'>{url}</span>"
+        f" &ensp; {state_html}"
         + (f" &ensp; <small>{note}</small>" if note else ""),
         unsafe_allow_html=True,
     )
+    if not ok and start_fn is not None:
+        col_btn, col_log = st.columns([1, 4])
+        with col_btn:
+            if st.button(f"▶️ Start {label}", key=f"start_{label}"):
+                with st.spinner(f"Starting {label}…"):
+                    ok2, msg = start_fn()
+                if ok2:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+        with col_log:
+            if log_name and STACK_LOG_DIR.exists():
+                log_path = STACK_LOG_DIR / f"{log_name}.log"
+                if log_path.exists():
+                    tail = ""
+                    try:
+                        r = subprocess.run(
+                            ["tail", "-n", "8", str(log_path)],
+                            capture_output=True, text=True, timeout=3,
+                        )
+                        tail = r.stdout.strip()
+                    except Exception:
+                        pass
+                    if tail:
+                        with st.expander(f"📋 Last lines of {log_name}.log"):
+                            st.code(tail, language="bash")
+                else:
+                    st.caption(f"No log yet: `{log_path}`")
 
 
 def tab_stack():
@@ -1446,14 +1558,26 @@ def tab_stack():
 
     status = StackManager.full_status()
     st.subheader("Service health")
-    _svc("llama-server (SYCL)", status["engine"],  f":{ENGINE_PORT}",
-         "Direct inference — no web search")
-    _svc("search proxy",        status["proxy"],   f":{PROXY_PORT}",
-         "Point AnythingLLM here — adds SearXNG transparently")
-    _svc("memory server",       status["memory"],  f":{MEMORY_PORT}",
-         "mem0 + ChromaDB persistent facts")
-    _svc("SearXNG",             status["searxng"], f":{SEARXNG_PORT}",
-         "Private Docker metasearch")
+
+    active = ModelManager.get_active_path()
+    gpu_layers = GPUDetector.gpu_layers()
+
+    _svc("llama-server (SYCL)", status["engine"], f":{ENGINE_PORT}",
+         "Direct inference — no web search",
+         start_fn=(lambda: StackManager.start_engine(active, gpu_layers)) if active else None,
+         log_name="engine")
+    _svc("search proxy", status["proxy"], f":{PROXY_PORT}",
+         "Point AnythingLLM here — adds SearXNG transparently",
+         start_fn=StackManager.start_search_proxy,
+         log_name="proxy")
+    _svc("memory server", status["memory"], f":{MEMORY_PORT}",
+         "mem0 + ChromaDB persistent facts",
+         start_fn=StackManager.start_memory_server,
+         log_name="memory")
+    _svc("SearXNG", status["searxng"], f":{SEARXNG_PORT}",
+         "Private Docker metasearch",
+         start_fn=StackManager.setup_searxng,
+         log_name="")
 
     if all(status.values()):
         st.success("✅ All four services online")
@@ -1499,7 +1623,6 @@ def tab_stack():
         "Replicates options **2 (Start) / 3 (Stop) / 4 (Restart)** from "
         "`ai_stack_manager.sh` — same SYCL env, same process patterns."
     )
-    gpu_layers = GPUDetector.gpu_layers()
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -1529,18 +1652,6 @@ def tab_stack():
                 for svc, (ok, msg) in results.items():
                     (st.success if ok else st.error)(f"{'✅' if ok else '❌'} {svc}: {msg}")
                 audit_log(st.session_state.username, "RESTART", str(results))
-
-    c4, c5 = st.columns(2)
-    with c4:
-        if st.button("▶️ Start memory server"):
-            with st.spinner("Starting…"):
-                ok, msg = StackManager.start_memory_server()
-            st.success(msg) if ok else st.error(msg)
-    with c5:
-        if st.button("▶️ Start search proxy"):
-            with st.spinner("Starting…"):
-                ok, msg = StackManager.start_search_proxy()
-            st.success(msg) if ok else st.error(msg)
 
     st.divider()
 
