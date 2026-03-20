@@ -70,34 +70,47 @@ launch:
 	bash $(LAUNCH)
 
 # ================================================================
-#  install-desktop  — install .desktop icon to app launcher + Desktop
+#  install-desktop  — generate and install the .desktop launcher
+#  Writes the file content directly so there is never a stale
+#  placeholder path.  The .desktop spec forbids shell metacharacters
+#  in Exec — all logic lives in run-desktop.sh.
 # ================================================================
 install-desktop:
-	@echo "▶  Installing desktop icon…"
+	@echo "▶  Making scripts executable..."
 	chmod +x $(LAUNCH) run-desktop.sh
+	@echo "▶  Writing desktop launcher..."
 	mkdir -p $(DESKTOP_DIR)
-	@# Substitute the real absolute path of run-desktop.sh into the Exec line.
-	@# The .desktop spec forbids shell metacharacters in Exec — the wrapper
-	@# script (run-desktop.sh) holds all the logic; Exec stays a plain path.
-	@sed -e "s|INSTALL_DIR|$(CURDIR)|g" \
-	    $(DESKTOP) > $(DESKTOP_DIR)/$(DESKTOP)
+	@# Write the .desktop file directly — no sed, no placeholder
+	@printf '[Desktop Entry]\n' > $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Version=1.0\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Type=Application\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Name=rust-ai-kit LLM Factory\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'GenericName=Local AI Assistant\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Comment=Start the rust-ai-kit stack and open the LLM Factory UI\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Exec=%s/run-desktop.sh\n' "$(CURDIR)" >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Icon=utilities-terminal\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Terminal=false\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Categories=Utility;\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Keywords=AI;LLM;chat;llama;Intel;Arc;\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'StartupNotify=true\n' >> $(DESKTOP_DIR)/$(DESKTOP)
 	chmod 644 $(DESKTOP_DIR)/$(DESKTOP)
-	@# Copy to ~/Desktop and trust it so GNOME shows it as launchable
+	@echo "  ✅  Written: $(DESKTOP_DIR)/$(DESKTOP)"
+	@# Copy to ~/Desktop and trust it
 	@if [ -d "$(HOME)/Desktop" ]; then \
 	    cp $(DESKTOP_DIR)/$(DESKTOP) $(HOME)/Desktop/$(DESKTOP); \
 	    chmod 644 $(HOME)/Desktop/$(DESKTOP); \
 	    gio trust $(HOME)/Desktop/$(DESKTOP) 2>/dev/null || true; \
 	    echo "  ✅  Copied to ~/Desktop/$(DESKTOP) (trusted)"; \
 	fi
-	@# Validate — errors here are fatal so we know immediately
+	@# Validate
 	@if command -v desktop-file-validate >/dev/null 2>&1; then \
 	    desktop-file-validate $(DESKTOP_DIR)/$(DESKTOP) \
-	        && echo "  ✅  Desktop file validates OK" \
-	        || (echo "  ❌  Validation failed — check $(DESKTOP)" && exit 1); \
+	        && echo "  ✅  Validates OK" \
+	        || (echo "  ❌  Validation failed" && exit 1); \
 	fi
 	@command -v update-desktop-database >/dev/null 2>&1 && \
 	    update-desktop-database $(DESKTOP_DIR) 2>/dev/null || true
-	@echo "  ✅  Installed to $(DESKTOP_DIR)/$(DESKTOP)"
+	@echo "  ✅  Done. Click the icon on your Desktop to launch."
 
 # ================================================================
 #  install-autostart  — start the stack automatically on login
