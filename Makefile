@@ -74,27 +74,28 @@ launch:
 # ================================================================
 install-desktop:
 	@echo "▶  Installing desktop icon…"
-	chmod +x $(LAUNCH)
+	chmod +x $(LAUNCH) run-desktop.sh
 	mkdir -p $(DESKTOP_DIR)
-	@# Write the .desktop file with the real absolute path substituted in
-	@sed \
-	    -e "s|%k/../../launch.sh|$(CURDIR)/$(LAUNCH)|g" \
-	    -e "s|Exec=bash|Exec=bash|" \
+	@# Substitute the real absolute path of run-desktop.sh into the Exec line.
+	@# The .desktop spec forbids shell metacharacters in Exec — the wrapper
+	@# script (run-desktop.sh) holds all the logic; Exec stays a plain path.
+	@sed -e "s|INSTALL_DIR|$(CURDIR)|g" \
 	    $(DESKTOP) > $(DESKTOP_DIR)/$(DESKTOP)
-	chmod +x $(DESKTOP_DIR)/$(DESKTOP)
-	@# Also put a copy on the Desktop if ~/Desktop exists
+	chmod 644 $(DESKTOP_DIR)/$(DESKTOP)
+	@# Copy to ~/Desktop and trust it so GNOME shows it as launchable
 	@if [ -d "$(HOME)/Desktop" ]; then \
 	    cp $(DESKTOP_DIR)/$(DESKTOP) $(HOME)/Desktop/$(DESKTOP); \
-	    chmod +x $(HOME)/Desktop/$(DESKTOP); \
+	    chmod 644 $(HOME)/Desktop/$(DESKTOP); \
 	    gio trust $(HOME)/Desktop/$(DESKTOP) 2>/dev/null || true; \
 	    echo "  ✅  Copied to ~/Desktop/$(DESKTOP) (trusted)"; \
 	fi
-	@# Validate if the tool is present
-	@command -v desktop-file-validate &>/dev/null && \
-	    desktop-file-validate $(DESKTOP_DIR)/$(DESKTOP) && \
-	    echo "  ✅  Desktop file validates OK" || true
-	@# Refresh the app launcher database
-	@command -v update-desktop-database &>/dev/null && \
+	@# Validate — errors here are fatal so we know immediately
+	@if command -v desktop-file-validate >/dev/null 2>&1; then \
+	    desktop-file-validate $(DESKTOP_DIR)/$(DESKTOP) \
+	        && echo "  ✅  Desktop file validates OK" \
+	        || (echo "  ❌  Validation failed — check $(DESKTOP)" && exit 1); \
+	fi
+	@command -v update-desktop-database >/dev/null 2>&1 && \
 	    update-desktop-database $(DESKTOP_DIR) 2>/dev/null || true
 	@echo "  ✅  Installed to $(DESKTOP_DIR)/$(DESKTOP)"
 
