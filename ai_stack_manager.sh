@@ -978,7 +978,7 @@ main() {
             12) benchmark           ;;
             13) uninstall           ;;
             14) manage_models       ;;
-            15) streamlit run llm_factory_rustaikit.py ;;
+            15) python3 llm_factory_rustaikit.py ;;
             0)  echo "Bye!"; exit 0 ;;
             *)  WARN "Invalid option."; sleep 1 ;;
         esac

@@ -162,3 +162,7 @@ class AuthManager:
 # ============================================================================
 # GPU DETECTION — mirrors _print_quick_status / check_status in script
 # ============================================================================
+
+logger = __import__('logging').getLogger(__name__)
+
+from core.config import audit_log  # auto-patched: was missing from core.auth
