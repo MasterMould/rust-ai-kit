@@ -3,6 +3,9 @@
 #  rust-ai-kit  ·  launch.sh
 #  Fully non-interactive: detects problems, applies fixes, starts
 #  everything, opens browser.  No terminal interaction required.
+#
+#  All background services are started with `nohup setsid` so they
+#  survive terminal window close (SIGHUP) without exception.
 # ================================================================
 # NO set -euo pipefail — must survive non-zero from health checks.
 
@@ -55,8 +58,6 @@ echo ""
 if [[ -f "$PATCH_SCRIPT" ]] && [[ -f "$PYTHON" ]]; then
     info "Checking core/ui imports..."
     PATCH_OUT=$("$PYTHON" "$PATCH_SCRIPT" 2>&1)
-    PATCH_EXIT=$?
-    # Show output only if something was patched or there was a problem
     if echo "$PATCH_OUT" | grep -qE "Fixed:|⚠️|❌"; then
         echo "$PATCH_OUT"
     else
@@ -79,12 +80,9 @@ export SYCL_DEVICE_FILTER="level_zero:gpu"
 [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env" 2>/dev/null || true
 
 # ================================================================
-#  STEP 3 — Auto-fix GPU render group (no logout needed via newgrp)
+#  STEP 3 — Auto-fix GPU render group
 # ================================================================
 _fix_render_group() {
-    # Add user to render+video groups non-interactively.
-    # Uses `newgrp` trick to activate membership in this shell session
-    # without requiring a full logout — works for the current process tree.
     local changed=false
 
     if ! groups | grep -qw "render"; then
@@ -102,15 +100,12 @@ _fix_render_group() {
         } || true
     fi
 
-    # Activate groups in current session without logout
     if $changed; then
         fix "Activating group membership in current session..."
-        # Re-exec this script under newgrp render so GPU is visible
-        # immediately without a full logout.
         if [[ -z "${_REEXECED_WITH_RENDER:-}" ]]; then
             export _REEXECED_WITH_RENDER=1
             exec newgrp render "$0" "$@" 2>/dev/null || {
-                warn "newgrp re-exec failed — a logout/login will fully activate GPU"
+                warn "newgrp re-exec failed — logout/login will fully activate GPU"
                 warn "Continuing with CPU fallback for this session"
             }
         fi
@@ -150,7 +145,6 @@ else
     _fix_libze
     _fix_render_group "$@"
 
-    # Re-check after fixes
     if _check_gpu; then
         GPU_LAYERS=99
         ok "GPU now visible after fix — GPU acceleration enabled"
@@ -184,7 +178,6 @@ _diagnose_and_fix_engine() {
 
     local fixed_something=false
 
-    # ── SYCL / level-zero ────────────────────────────────────────────────────
     if grep -qi "no device of requested type\|level_zero\|ze_result_error\|cl_invalid" "$log" 2>/dev/null; then
         warn "SYCL / level-zero GPU error detected"
         _fix_libze
@@ -192,7 +185,6 @@ _diagnose_and_fix_engine() {
         fixed_something=true
     fi
 
-    # ── Port conflict ─────────────────────────────────────────────────────────
     if grep -qi "address already in use\|bind.*failed" "$log" 2>/dev/null; then
         local stale
         stale=$(lsof -ti ":${ENGINE_PORT}" 2>/dev/null | head -1)
@@ -205,10 +197,8 @@ _diagnose_and_fix_engine() {
         fi
     fi
 
-    # ── Model file ────────────────────────────────────────────────────────────
     if grep -qi "failed to load\|invalid model\|no such file\|gguf" "$log" 2>/dev/null; then
         warn "Model load failure detected"
-        # Try to find another model and switch to it
         local alt
         alt=$(find "$MODEL_DIR" -maxdepth 1 -name "*.gguf" 2>/dev/null | sort | head -1)
         if [[ -n "$alt" ]]; then
@@ -225,7 +215,6 @@ _diagnose_and_fix_engine() {
 }
 
 _start_engine_once() {
-    # Resolve model
     local model_path=""
     [[ -f "$MODEL_CONFIG" ]] && model_path=$(cat "$MODEL_CONFIG" | tr -d '[:space:]')
     if [[ -z "$model_path" ]] || [[ ! -f "$model_path" ]]; then
@@ -236,29 +225,32 @@ _start_engine_once() {
     if [[ ! -f "$LLAMACPP_BIN" ]]; then
         err "llama-server not found: $LLAMACPP_BIN"
         err "Run: ./ai_stack_manager.sh  →  option 1"
-        return 2  # fatal — no point retrying
+        return 2
     fi
     if [[ -z "$model_path" ]] || [[ ! -f "$model_path" ]]; then
         err "No model found in $MODEL_DIR"
         err "Run: ./ai_stack_manager.sh  →  option 14"
-        return 2  # fatal
+        return 2
     fi
 
-    # Kill anything on the port first
+    # Kill anything already on the port
     local stale
     stale=$(lsof -ti ":${ENGINE_PORT}" 2>/dev/null | head -1)
     [[ -n "$stale" ]] && { kill -9 "$stale" 2>/dev/null || true; sleep 1; }
 
-    # Rotate log
+    # Rotate log so failure output is clean
     [[ -f "$LOG_DIR/engine.log" ]] && \
         mv "$LOG_DIR/engine.log" "$LOG_DIR/engine.log.prev" 2>/dev/null || true
 
     info "Starting llama-server: $(basename "$model_path")"
     info "GPU layers: $GPU_LAYERS"
 
+    # nohup + setsid: process survives terminal close (SIGHUP)
+    # setsid creates a new session with no controlling terminal
+    # nohup explicitly ignores SIGHUP as a belt-and-braces measure
     ONEAPI_DEVICE_SELECTOR="level_zero:0" \
     SYCL_DEVICE_FILTER="level_zero:gpu" \
-    "$LLAMACPP_BIN" \
+    nohup setsid "$LLAMACPP_BIN" \
         --model        "$model_path" \
         --ctx-size     8192 \
         --n-gpu-layers "$GPU_LAYERS" \
@@ -275,28 +267,35 @@ _start_engine_once() {
         sleep 1
         printf "\r  ${C}  Waiting… %2ds${N}" "$i"
 
-        if ! kill -0 "$pid" 2>/dev/null; then
-            echo ""
-            err "Engine process exited after ${i}s"
-            _show_log_tail 25
-            return 1  # retriable
-        fi
-
+        # setsid means kill -0 on the wrapper PID may not track the child,
+        # so we check the port directly and trust engine.log for crash detection
         if engine_alive; then
             echo ""
             ok "Engine API live after ${i}s"
             return 0
+        fi
+
+        # Check log for early fatal errors (no point waiting 90s)
+        if [[ -f "$LOG_DIR/engine.log" ]] && (( i > 5 )); then
+            if grep -qi "error\|failed\|abort\|fatal" "$LOG_DIR/engine.log" 2>/dev/null; then
+                # Only bail if the process also isn't alive
+                if ! kill -0 "$pid" 2>/dev/null && ! pgrep -f "llama-server" >/dev/null 2>&1; then
+                    echo ""
+                    err "Engine process crashed after ${i}s"
+                    _show_log_tail 25
+                    return 1
+                fi
+            fi
         fi
     done
 
     echo ""
     err "Engine did not respond after 90s"
     _show_log_tail 25
-    kill "$pid" 2>/dev/null || true
-    return 1  # retriable
+    return 1
 }
 
-# ── Engine: start with auto-retry after diagnosis ─────────────────────────────
+# ── Engine: start with auto-retry ────────────────────────────────────────────
 ENGINE_OK=false
 
 if engine_alive; then
@@ -315,18 +314,15 @@ else
             ENGINE_OK=true
             break
         elif [[ $RC -eq 2 ]]; then
-            # Fatal (binary/model missing) — no point retrying
-            break
+            break  # fatal — binary or model missing
         fi
 
-        # Attempt failed — diagnose and auto-fix before retry
         warn "Attempt $attempt failed — running auto-diagnosis..."
         if _diagnose_and_fix_engine; then
             fix "Fixes applied — retrying..."
             sleep 2
         else
-            warn "No auto-fix available for this failure"
-            # Still retry in case it was a transient issue (e.g. GPU warmup)
+            warn "No auto-fix found"
             if [[ $attempt -lt 3 ]]; then
                 warn "Retrying anyway (attempt $((attempt+1)) of 3)..."
                 sleep 3
@@ -343,6 +339,7 @@ fi
 
 # ================================================================
 #  STEP 7 — Memory server + search proxy
+#  Both use nohup + setsid so they survive terminal close.
 # ================================================================
 if $ENGINE_OK; then
     MEM_LAUNCH="$MEM_DIR/start_memory_server.sh"
@@ -351,24 +348,31 @@ if $ENGINE_OK; then
         LLAMA_API_KEY=local \
         LLAMA_BASE_URL="http://localhost:${ENGINE_PORT}/v1" \
         LLAMA_MODEL=llama \
-        bash "$MEM_LAUNCH" >> "$LOG_DIR/memory.log" 2>&1 &
+        nohup setsid bash "$MEM_LAUNCH" >> "$LOG_DIR/memory.log" 2>&1 &
         sleep 3
-        kill -0 $! 2>/dev/null && ok "Memory server → http://localhost:8000" \
-                                || warn "Memory server exited — see memory.log"
+        if curl -sf http://localhost:8000/health >/dev/null 2>&1; then
+            ok "Memory server → http://localhost:8000"
+        else
+            warn "Memory server may still be starting — check memory.log if needed"
+        fi
     fi
 
     PROXY_LAUNCH="$PROXY_DIR/start_search_proxy.sh"
     if [[ -f "$PROXY_LAUNCH" ]] && ! curl -sf http://localhost:8090/health >/dev/null 2>&1; then
         info "Starting search proxy..."
-        bash "$PROXY_LAUNCH" >> "$LOG_DIR/proxy.log" 2>&1 &
+        nohup setsid bash "$PROXY_LAUNCH" >> "$LOG_DIR/proxy.log" 2>&1 &
         sleep 2
-        kill -0 $! 2>/dev/null && ok "Search proxy → http://localhost:8090" \
-                                || warn "Search proxy exited — see proxy.log"
+        if curl -sf http://localhost:8090/health >/dev/null 2>&1; then
+            ok "Search proxy → http://localhost:8090"
+        else
+            warn "Search proxy may still be starting — check proxy.log if needed"
+        fi
     fi
 fi
 
 # ================================================================
 #  STEP 8 — Streamlit
+#  nohup + setsid: survives terminal close.
 # ================================================================
 streamlit_alive() {
     curl -sf "http://localhost:${STREAMLIT_PORT}" >/dev/null 2>&1
@@ -388,7 +392,7 @@ else
     mkdir -p "$(dirname "$APP_LOG")"
     [[ -f "$APP_LOG" ]] && mv "$APP_LOG" "${APP_LOG}.prev" 2>/dev/null || true
 
-    nohup "$STREAMLIT" run "$APP" \
+    nohup setsid "$STREAMLIT" run "$APP" \
         --server.port        "$STREAMLIT_PORT" \
         --server.headless    true \
         --server.address     0.0.0.0 \
@@ -406,12 +410,17 @@ else
             ok "Streamlit live after ${i}s"
             break
         fi
-        if ! kill -0 "$ST_PID" 2>/dev/null; then
-            echo ""
-            err "Streamlit crashed. Last log:"
-            tail -20 "$APP_LOG" 2>/dev/null | sed 's/^/    /' || true
-            err "Run:  make setup   (missing dependency likely)"
-            exit 1
+        # Check log for crash
+        if [[ -f "$APP_LOG" ]] && (( i > 5 )); then
+            if grep -qi "error\|traceback\|exception" "$APP_LOG" 2>/dev/null; then
+                if ! pgrep -f "streamlit run" >/dev/null 2>&1; then
+                    echo ""
+                    err "Streamlit crashed. Last log:"
+                    tail -20 "$APP_LOG" 2>/dev/null | sed 's/^/    /' || true
+                    err "Run:  make setup   (missing dependency likely)"
+                    exit 1
+                fi
+            fi
         fi
     done
     echo ""
@@ -424,7 +433,7 @@ URL="http://localhost:${STREAMLIT_PORT}"
 _notify "LLM Factory ready → $URL"
 xdg-open "$URL" 2>/dev/null &
 
-# ── Final status summary ───────────────────────────────────────────────────
+# ── Final status summary ──────────────────────────────────────────
 echo ""
 sep
 engine_alive \
@@ -441,5 +450,3 @@ streamlit_alive \
     || echo -e "  ${R}🔴 Streamlit :${STREAMLIT_PORT}${N}"
 sep
 echo ""
-sleep 5
-exit

@@ -147,24 +147,6 @@ class SecurityConfig:
 
 SECURITY_CONFIG = SecurityConfig()
 
-# ── Admin-level RAG permissions (injected by fix_rag_admin.py) ───────────────
-ADMIN_MAX_FILE_SIZE_MB: int = 100
-
-ADMIN_ALLOWED_EXTENSIONS = [
-    # Documents
-    ".pdf", ".docx", ".doc", ".odt", ".rtf",
-    ".txt", ".md", ".rst", ".tex", ".csv",
-    # Code & data
-    ".py", ".js", ".ts", ".rs", ".go", ".java", ".cpp", ".c", ".h",
-    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env",
-    ".xml", ".html", ".htm", ".css", ".sh", ".bash",
-    # Notebooks & logs
-    ".ipynb", ".log",
-    # Archives (content extracted as listing)
-    ".zip", ".tar", ".gz",
-]
-
-
 # App-local dirs (separate from the stack install)
 BASE_DIR         = Path(__file__).parent
 APP_WORKSPACE    = BASE_DIR / "workspace"
