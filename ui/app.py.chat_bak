@@ -122,79 +122,12 @@ def main():
         st.subheader("🤖 Active Model")
 
         if backend == BackendMode.RUSTAIKIT.value:
-            # ── Live model selector ──────────────────────────────────────
-            installed = ModelManager.list_installed()  # [{name, path, size_human, is_active}]
             active_path = ModelManager.get_active_path()
-
-            if not installed:
-                st.error("No models found — use Model Manager tab")
+            active_name = Path(active_path).name if active_path else "none"
+            if active_path:
+                st.success(f"**{active_name}**")
             else:
-                # Build display labels: show size + active marker
-                labels = []
-                for m in installed:
-                    marker = "▶ " if m["is_active"] else "  "
-                    labels.append(marker + m["name"] + "  (" + m["size_human"] + ")")
-
-                # Default selection = currently active model
-                default_idx = next(
-                    (i for i, m in enumerate(installed) if m["is_active"]), 0
-                )
-                chosen_label = st.selectbox(
-                    "🤖 Model",
-                    labels,
-                    index=default_idx,
-                    help="Select a model. Changes take effect after restarting the engine.",
-                )
-                chosen_idx  = labels.index(chosen_label)
-                chosen_path = installed[chosen_idx]["path"]
-                chosen_name = installed[chosen_idx]["name"]
-
-                # Write MODEL_CONFIG if selection changed
-                if chosen_path != active_path:
-                    if ModelManager.set_active(chosen_path):
-                        st.success(f"Active model → {chosen_name}")
-                        c_restart, _ = st.columns([1, 1])
-                        with c_restart:
-                            if st.button("🔄 Restart engine", type="primary",
-                                         help="Sends SIGTERM so the new model loads"):
-                                ok2, msg = ModelManager.restart_engine()
-                                st.info(msg)
-
-                # Fetch live HuggingFace catalogue in an expander
-                with st.expander("📦 Download a new model"):
-                    st.caption("Live catalogue — fetched from HuggingFace bartowski collection")
-                    if st.button("🔄 Refresh catalogue", key="refresh_cat"):
-                        st.session_state._model_catalogue = ModelManager.fetch_catalogue()
-                    catalogue = st.session_state.get("_model_catalogue",
-                                                     ModelManager.fetch_catalogue())
-                    cat_labels = [
-                        m["name"] + "  (" + m["vram"] + " GB VRAM)"
-                        for m in catalogue
-                    ]
-                    cat_choice = st.selectbox("Available models", cat_labels,
-                                              key="cat_sel")
-                    cat_idx = cat_labels.index(cat_choice)
-                    cat_m   = catalogue[cat_idx]
-                    st.caption(cat_m["desc"])
-                    dest = Path(ModelManager.get_active_path()).parent / cat_m["file"] \
-                           if ModelManager.get_active_path() \
-                           else Path.home() / "ai_stack" / "models" / cat_m["file"]
-                    if dest.exists():
-                        st.success(f"Already downloaded ({dest.stat().st_size / 1e9:.1f} GB)")
-                        if st.button("Set as active", key="cat_activate"):
-                            ModelManager.set_active(str(dest))
-                            st.rerun()
-                    else:
-                        if st.button("⬇️ Download", key="cat_dl", type="primary"):
-                            with st.spinner(f"Downloading {cat_m['file']}..."):
-                                ok2, msg = ModelManager.download(
-                                    cat_m["file"], cat_m["url"]
-                                )
-                            st.success(msg) if ok2 else st.error(msg)
-                            if ok2:
-                                st.session_state._model_catalogue = None
-                                st.rerun()
-
+                st.error("No model — use Model Manager")
             st.session_state.search_enabled = st.toggle(
                 "🌐 Web search (:8090)",
                 value=st.session_state.search_enabled,

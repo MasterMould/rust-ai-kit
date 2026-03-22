@@ -20,15 +20,9 @@ def _send(user_input: str, temperature: float, max_tokens: int):
     web_used  = False
 
     if st.session_state.rag_enabled:
-        # Search with more results and include full content when available
-        docs = RAGManager.search(sanitized, max_results=5)
+        docs = RAGManager.search(sanitized)
         if docs:
-            parts = []
-            for d in docs:
-                header = f"[Document: {d['filename']} | relevance: {d['score']}]"
-                body   = d.get("full_content") or d["context"]
-                parts.append(header + "\n" + body)
-            rag_ctx = "\n\n---\n\n".join(parts)
+            rag_ctx = "\n\n".join(f"[Doc: {d['filename']}]\n{d['context']}" for d in docs)
 
     if is_rak and st.session_state.mem_enabled:
         try:
@@ -40,14 +34,7 @@ def _send(user_input: str, temperature: float, max_tokens: int):
     if mem_ctx:
         sys_parts.append(mem_ctx)
     if rag_ctx:
-        # Inject RAG context where the model will see it before the question
-        rag_block = (
-            "## Relevant context from uploaded documents:\n"
-            "Use the following context to answer the user's question.\n"
-            "If the answer is in the context, cite it directly.\n\n"
-            + rag_ctx
-        )
-        sys_parts.append(rag_block)
+        sys_parts.append(f"## Context from local documents:\n{rag_ctx}")
 
     messages = [{"role": "system", "content": "\n\n".join(sys_parts)}]
     for m in st.session_state.chat_history:
