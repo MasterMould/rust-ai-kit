@@ -3,7 +3,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from core.config    import BackendMode, ENGINE_PORT, STACK_LOG_DIR
+from core.config    import BackendMode, ENGINE_PORT, STACK_LOG_DIR, HOME
 from core.auth      import audit_log
 from core.gpu       import GPUDetector
 from core.stack     import StackManager
