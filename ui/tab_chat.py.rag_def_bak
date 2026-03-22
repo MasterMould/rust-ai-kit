@@ -13,110 +13,93 @@ from core.inference import InferenceClient, OllamaClient
 from core.security_rag import SecurityValidator, RAGManager
 
 def _send(user_input: str, temperature: float, max_tokens: int):
-    """
-    Build messages and send to inference endpoint.
-    RAG context is injected into the system prompt with explicit
-    instructions so the model knows to use it.
-    """
     username  = st.session_state.username
     sanitized = SecurityValidator.sanitize(user_input)
     is_rak    = st.session_state.backend == BackendMode.RUSTAIKIT.value
-    rag_ctx   = ""
-    mem_ctx   = ""
+    rag_ctx   = mem_ctx = ""
     web_used  = False
 
-    # ── 1. Local RAG ────────────────────────────────────────────────────
-    if st.session_state.get("rag_enabled", False):
+    if st.session_state.rag_enabled:
+        # Search with more results and include full content when available
         docs = RAGManager.search(sanitized, max_results=5)
         if docs:
             parts = []
             for d in docs:
-                header = (
-                    "[Document: " + d["filename"]
-                    + " | relevance score: " + str(d["score"]) + "]"
-                )
-                body = d.get("full_content") or d["context"]
+                header = f"[Document: {d['filename']} | relevance: {d['score']}]"
+                body   = d.get("full_content") or d["context"]
                 parts.append(header + "\n" + body)
             rag_ctx = "\n\n---\n\n".join(parts)
 
-    # ── 2. Memory retrieval (rust-ai-kit only) ───────────────────────────
-    if is_rak and st.session_state.get("mem_enabled", True):
+    if is_rak and st.session_state.mem_enabled:
         try:
             mem_ctx = MemoryManager.build_context(sanitized, username)
         except Exception:
             pass
 
-    # ── 3. Build system prompt ───────────────────────────────────────────
-    # Order: base prompt → memory context → RAG context
-    # RAG goes LAST so it is closest to the user turn in the context window
-    system_parts = [st.session_state.get("system_prompt",
-                                          "You are a helpful AI assistant.")]
+    sys_parts = [st.session_state.system_prompt]
     if mem_ctx:
-        system_parts.append(mem_ctx)
+        sys_parts.append(mem_ctx)
     if rag_ctx:
-        rag_instruction = (
-            "## Context from uploaded documents\n"
-            "The following excerpts are from documents the user has uploaded. "
-            "Read them carefully and use them to answer the question. "
-            "If the answer appears in the documents, quote the relevant passage.\n\n"
+        # Inject RAG context where the model will see it before the question
+        rag_block = (
+            "## Relevant context from uploaded documents:\n"
+            "Use the following context to answer the user's question.\n"
+            "If the answer is in the context, cite it directly.\n\n"
             + rag_ctx
         )
-        system_parts.append(rag_instruction)
+        sys_parts.append(rag_block)
 
-    # ── 4. Pre-flight: check engine is reachable ─────────────────────────
-    if is_rak and not StackManager.engine_running():
-        st.session_state._engine_down = True
-        return
-    st.session_state._engine_down = False
-
-    # ── 5. Assemble message list ─────────────────────────────────────────
-    messages = [{"role": "system", "content": "\n\n".join(system_parts)}]
+    messages = [{"role": "system", "content": "\n\n".join(sys_parts)}]
     for m in st.session_state.chat_history:
         messages.append({"role": m["role"], "content": m["content"]})
     messages.append({"role": "user", "content": sanitized})
 
-    # ── 6. Send to inference endpoint ────────────────────────────────────
-    with st.spinner("Thinking\u2026"):
+    # ── Pre-flight: check engine is reachable before touching history ──────────
+    if is_rak and not StackManager.engine_running():
+        st.session_state._engine_down = True
+        return   # tab_chat will show the actionable banner; nothing added to history
+
+    st.session_state._engine_down = False
+
+    with st.spinner("🤔 Thinking…"):
         if is_rak:
-            use_proxy = st.session_state.get("search_enabled", True)
+            use_proxy = st.session_state.search_enabled
             resp  = InferenceClient.chat(messages, use_proxy, temperature, max_tokens)
+            # If both endpoints failed, surface as a UI error — not in chat history
             if "error" in resp:
-                st.session_state._last_error  = resp["error"]
+                st.session_state._last_error = resp["error"]
                 st.session_state._engine_down = True
                 return
-            reply    = InferenceClient.reply(resp)
+            reply = InferenceClient.reply(resp)
             web_used = use_proxy
         else:
             if not OllamaClient.running():
                 st.session_state._engine_down = True
                 return
-            reply = OllamaClient.chat(messages,
-                                       st.session_state.ollama_model, temperature)
+            reply = OllamaClient.chat(messages, st.session_state.ollama_model, temperature)
 
-    # ── 7. Store in history (only on success) ────────────────────────────
-    st.session_state.chat_history.append({"role": "user",  "content": sanitized})
+    # Only write to history on success
+    st.session_state.chat_history.append({"role": "user", "content": sanitized})
     st.session_state.chat_history.append({
-        "role":    "assistant",
-        "content": reply,
-        "rag":     bool(rag_ctx),
-        "mem":     bool(mem_ctx),
-        "web":     web_used,
+        "role": "assistant", "content": reply,
+        "rag": bool(rag_ctx), "mem": bool(mem_ctx), "web": web_used,
     })
-    st.session_state._engine_down = False
-    st.session_state.pop("_last_error", None)
 
-    # ── 8. Background memorise ────────────────────────────────────────────
-    if is_rak and st.session_state.get("mem_enabled", True) and StackManager.memory_running():
+    if is_rak and st.session_state.mem_enabled and StackManager.memory_running():
         try:
             MemoryManager.memorize(
-                [{"role": "user",      "content": sanitized},
+                [{"role": "user", "content": sanitized},
                  {"role": "assistant", "content": reply}],
                 username,
             )
         except Exception:
             pass
 
+    # Clear any previous error state on success
+    st.session_state._engine_down = False
+    st.session_state.pop("_last_error", None)
     audit_log(username, "CHAT", f"backend={st.session_state.backend}")
+
 
 def tab_chat(temperature: float, max_tokens: int):
     st.header("💬 Chat")

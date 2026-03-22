@@ -9,7 +9,6 @@ from typing import Dict, List, Tuple
 import requests
 
 from core.config import (
-        HOME,
     INSTALL_DIR, LLAMACPP_BIN, STACK_LOG_DIR, PID_FILE,
     MEM_DIR, PROXY_DIR, SYSTEMD_DIR,
     ENGINE_PORT, SEARXNG_PORT, MEMORY_PORT, PROXY_PORT,
