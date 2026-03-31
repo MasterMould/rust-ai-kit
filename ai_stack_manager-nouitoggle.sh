@@ -15,19 +15,11 @@ MODEL_DIR="$INSTALL_DIR/models"
 MEM_DIR="$INSTALL_DIR/memory_server"
 PROXY_DIR="$INSTALL_DIR/search_proxy"
 MODEL_CONFIG="$INSTALL_DIR/.active_model"   # persists chosen model across sessions
-UI_CONFIG="$INSTALL_DIR/.ui_enabled"        # persists UI on/off preference
 LLAMACPP_BIN="$INSTALL_DIR/llama.cpp/build/bin/llama-server"
 LOG_DIR="$INSTALL_DIR/logs"
 PID_FILE="$INSTALL_DIR/.pids"
 APPS_DIR="$HOME/Applications"
-ANYTHINGLLM_BIN="$HOME/.local/bin/anythingllm"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
-
-# ── UI enabled state ──────────────────────────────────────────────
-_ui_enabled() {
-    # Default ON if config file absent; OFF if file contains "off"
-    [[ ! -f "$UI_CONFIG" ]] || [[ "$(cat "$UI_CONFIG" 2>/dev/null)" != "off" ]]
-}
 
 # ── Read active model from config (falls back to first .gguf found) ─
 _load_active_model() {
@@ -126,12 +118,7 @@ show_menu() {
     echo ""
     echo -e "${W}  Models${N}"
     echo "  14) Model Manager  (download · switch · delete)"
-    echo ""
-    if _ui_enabled; then
-        echo "  15) Disable Web UI  (AnythingLLM)"
-    else
-        echo "  15) Enable Web UI   (AnythingLLM)"
-    fi
+    echo "  15) LLM-Factory "
     echo ""
     echo "  0)  Exit"
     echo -e "${B}  ──────────────────────────────────────────────${N}"
@@ -139,7 +126,7 @@ show_menu() {
 }
 
 _print_quick_status() {
-    local engine_s mem_s proxy_s searxng_s gpu_s ui_s
+    local engine_s mem_s proxy_s searxng_s gpu_s
 
     if pgrep -f "llama-server" &>/dev/null || _svc_running "llamaedge"; then
         engine_s="${G}● running${N}"
@@ -165,18 +152,8 @@ _print_quick_status() {
         gpu_s="${Y}⚠ GPU not detected${N}"
     fi
 
-    if _ui_enabled; then
-        if pgrep -f "AnythingLLM\|anythingllm" &>/dev/null; then
-            ui_s="${G}● running${N}"
-        else
-            ui_s="${Y}○ enabled (not running)${N}"
-        fi
-    else
-        ui_s="${Y}○ disabled${N}"
-    fi
-
     echo -e "  Engine: $engine_s  Memory: $mem_s  GPU: $gpu_s"
-    echo -e "  Proxy:  $proxy_s   Search: $searxng_s  UI: $ui_s"
+    echo -e "  Proxy:  $proxy_s   Search: $searxng_s"
     if [[ -n "${MODEL_PATH:-}" ]]; then
         echo -e "  Model:  ${W}$(basename "$MODEL_PATH")${N}"
     else
@@ -328,22 +305,11 @@ start_stack() {
     else
         INFO "Search proxy not installed — run Install (option 1) to set it up."
     fi
-
-    STEP "AnythingLLM UI"
-    if _ui_enabled; then
-        if command -v anythingllm &>/dev/null; then
-            anythingllm &>/dev/null &
-            OK "AnythingLLM launched."
-        elif [[ -f "$APPS_DIR/AnythingLLM.AppImage" ]]; then
-            "$APPS_DIR/AnythingLLM.AppImage" &>/dev/null &
-            OK "AnythingLLM launched."
-        else
-            WARN "AnythingLLM not found — run Install (option 1)."
-        fi
+    if command -v anythingllm &>/dev/null; then
+        anythingllm &>/dev/null &
+        OK "AnythingLLM launched."
     else
-        INFO "UI is disabled — AnythingLLM not started."
-        INFO "API available directly at http://localhost:8090/v1"
-        INFO "Toggle with option 15."
+        WARN "AnythingLLM not found — launch $APPS_DIR/AnythingLLM.AppImage manually."
     fi
 
     echo ""
@@ -991,28 +957,6 @@ validate_stack() {
     PAUSE
 }
 
-toggle_ui() {
-    if _ui_enabled; then
-        echo "off" > "$UI_CONFIG"
-        OK "AnythingLLM UI disabled — will not auto-start with stack."
-        INFO "To kill a running instance: pkill -f AnythingLLM"
-    else
-        echo "on" > "$UI_CONFIG"
-        OK "AnythingLLM UI enabled — will auto-start with stack."
-        if ask "Launch AnythingLLM now?"; then
-            if command -v anythingllm &>/dev/null; then
-                anythingllm &>/dev/null &
-                OK "AnythingLLM launched."
-            elif [[ -f "$APPS_DIR/AnythingLLM.AppImage" ]]; then
-                "$APPS_DIR/AnythingLLM.AppImage" &>/dev/null &
-                OK "AnythingLLM launched."
-            else
-                WARN "AnythingLLM binary not found — run Install (option 1)."
-            fi
-        fi
-    fi
-    PAUSE
-}
 
 # ================================================================
 main() {
@@ -1034,7 +978,7 @@ main() {
             12) benchmark           ;;
             13) uninstall           ;;
             14) manage_models       ;;
-            15) toggle_ui           ;;
+            15) python3 llm_factory_rustaikit.py ;;
             0)  echo "Bye!"; exit 0 ;;
             *)  WARN "Invalid option."; sleep 1 ;;
         esac
