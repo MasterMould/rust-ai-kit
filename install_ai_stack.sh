@@ -230,17 +230,55 @@ https://apt.repos.intel.com/oneapi all main" \
 #  STEP 3 — Uninstall
 # ================================================================
 write_uninstall_script() {
-    STEP "3/7 Writing uninstall script"
-    cat > "$INSTALL_DIR/uninstall.sh" <<EOF
+    STEP "Writing uninstall script"
+
+    local UNINSTALL_PATH="$INSTALL_DIR/../uninstall_ai_stack.sh"
+
+    cat > "$UNINSTALL_PATH" <<'EOF'
 #!/bin/bash
-echo "Removing AI stack..."
-rm -rf "$INSTALL_DIR"
-rm -f ~/.local/bin/anythingllm
-rm -f ~/.local/share/applications/anythingllm.desktop
-echo "Done."
+set -euo pipefail
+
+INSTALL_DIR="$HOME/ai_stack"
+MODEL_DIR="$INSTALL_DIR/models"
+
+echo "🧹 AI Stack Uninstaller"
+echo ""
+
+if [[ ! -d "$INSTALL_DIR" ]]; then
+    echo "Nothing to uninstall."
+    exit 0
+fi
+
+read -rp "Remove downloaded models as well? [y/N]: " rm_models
+rm_models="${rm_models:-n}"
+
+echo ""
+echo "Removing core stack..."
+
+# Remove everything except models (handled separately)
+if [[ -d "$INSTALL_DIR" ]]; then
+    find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name models -exec rm -rf {} +
+fi
+
+# Handle models separately
+if [[ "${rm_models,,}" == "y" ]]; then
+    echo "Removing models..."
+    rm -rf "$MODEL_DIR"
+else
+    echo "Keeping models at: $MODEL_DIR"
+fi
+
+# Clean up desktop + symlinks
+rm -f "$HOME/.local/bin/anythingllm" 2>/dev/null || true
+rm -f "$HOME/.local/share/applications/anythingllm.desktop" 2>/dev/null || true
+
+echo ""
+echo "✅ Uninstall complete."
+echo "📦 Remaining (if kept): $MODEL_DIR"
 EOF
-    chmod +x "$INSTALL_DIR/uninstall.sh"
-    OK "Uninstall script created → $INSTALL_DIR/uninstall.sh"
+
+    chmod +x "$UNINSTALL_PATH"
+    OK "Uninstall script created → $UNINSTALL_PATH"
 }
 
 
