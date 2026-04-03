@@ -439,7 +439,8 @@ if [[ "$ENABLE_WEBUI" == "1" ]]; then
         && echo -e "  ${G}🟢 Streamlit  →  ${C}${URL}${N}" \
         || echo -e "  ${R}🔴 Streamlit :${STREAMLIT_PORT}${N}"
 else
-    echo -e "  ${Y}⚪ WebUI disabled (use --webui to enable)${N}"
+    echo -e "  ${Y}⚪ WebUI disabled (use launch.sh --webui to enable)${N}"
+    sleep 5
 fi
 # ── Final status summary ──────────────────────────────────────────
 echo ""
@@ -453,9 +454,13 @@ curl -sf http://localhost:8000/health >/dev/null 2>&1 \
 curl -sf http://localhost:8090/health >/dev/null 2>&1 \
     && echo -e "  ${G}🟢 Proxy     :8090${N}" \
     || echo -e "  ${Y}⚪ Proxy     :8090${N}"
+if [[ "$ENABLE_WEBUI" == "1" ]]; then
 streamlit_alive \
     && echo -e "  ${G}🟢 Streamlit  →  ${C}${URL}${N}" \
     || echo -e "  ${R}🔴 Streamlit :${STREAMLIT_PORT}${N}"
+else
+    echo -e "  ${Y}⚪ WebUI disabled (use launch.sh --webui to enable)${N}"
+fi    
 sep
 sleep 5
 echo ""
