@@ -29,6 +29,8 @@ PATCH_SCRIPT="$SCRIPT_DIR/patch_core.py"
 ENGINE_PORT=8080
 STREAMLIT_PORT=8501
 
+ENABLE_WEBUI="${ENABLE_WEBUI:-0}"
+
 mkdir -p "$LOG_DIR" "$SCRIPT_DIR/logs" 2>/dev/null
 
 # ── Colours ────────────────────────────────────────────────────────
@@ -371,9 +373,10 @@ if $ENGINE_OK; then
 fi
 
 # ================================================================
-#  STEP 8 — Streamlit
+#  STEP 8 — Streamlit (optional WebUI)
 #  nohup + setsid: survives terminal close.
 # ================================================================
+if [[ "$ENABLE_WEBUI" == "1" ]]; then
 streamlit_alive() {
     curl -sf "http://localhost:${STREAMLIT_PORT}" >/dev/null 2>&1
 }
@@ -425,14 +428,19 @@ else
     done
     echo ""
 fi
+fi
 
 # ================================================================
-#  STEP 9 — Open browser
+#  STEP 9 — Open browser (optional WebUI)
 # ================================================================
-URL="http://localhost:${STREAMLIT_PORT}"
-_notify "LLM Factory ready → $URL"
-xdg-open "$URL" 2>/dev/null &
-
+if [[ "$ENABLE_WEBUI" == "1" ]]; then
+    URL="http://localhost:${STREAMLIT_PORT}"
+    streamlit_alive \
+        && echo -e "  ${G}🟢 Streamlit  →  ${C}${URL}${N}" \
+        || echo -e "  ${R}🔴 Streamlit :${STREAMLIT_PORT}${N}"
+else
+    echo -e "  ${Y}⚪ WebUI disabled (use --webui to enable)${N}"
+fi
 # ── Final status summary ──────────────────────────────────────────
 echo ""
 sep
