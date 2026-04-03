@@ -6,6 +6,9 @@
 # ================================================================
 
 set -euo pipefail
+# Optional debug + features
+[[ "${DEBUG:-0}" == "1" ]] && set -x
+USE_BITNET="${USE_BITNET:-}"
 
 # ── Colours ─────────────────────────────────────────────────────
 R='\033[0;31m' G='\033[0;32m' Y='\033[1;33m'
@@ -51,6 +54,15 @@ preflight() {
     [[ "$(uname -m)" == "x86_64" ]] || ERR "x86_64 required."
 
     echo -e "${W}  GPU detection:${N}"
+# Method 1    
+        if clinfo | grep -i "Device Name" | grep -iq "Arc"; then
+    OK "  Intel Arc GPU visible via OpenCL"
+    else
+        WARN "  Intel Arc GPU NOT fully visible via OpenCL"
+    fi
+
+# Method 2
+    
     if lspci | grep -qi "Arc A770"; then
         OK "Intel Arc A770 detected."
     else
@@ -58,8 +70,11 @@ preflight() {
         lspci | grep -i "VGA\|Display\|3D" || true
     fi
 
+    sleep 5
+
     echo ""
     INFO "Available disk: $(df -h "$HOME" | awk 'NR==2{print $4}') free"
+    INFO "System RAM: $(free -h | awk '/Mem:/ {print $2}')"
     WARN "The 8B model download is ~5 GB. Ensure you have ~8 GB free total."
     ask "Continue?" || exit 0
 }
@@ -188,6 +203,20 @@ https://apt.repos.intel.com/oneapi all main" \
     fi
 }
 
+write_uninstall_script() {
+    STEP "3/7 Writing uninstall script"
+    cat > "$INSTALL_DIR/uninstall.sh" <<EOF
+#!/bin/bash
+echo "Removing AI stack..."
+rm -rf "$INSTALL_DIR"
+rm -f ~/.local/bin/anythingllm
+rm -f ~/.local/share/applications/anythingllm.desktop
+echo "Done."
+EOF
+    chmod +x "$INSTALL_DIR/uninstall.sh"
+    OK "Uninstall script created → $INSTALL_DIR/uninstall.sh"
+}
+
 # ================================================================
 #  STEP 3 — Rust
 # ================================================================
@@ -231,6 +260,7 @@ install_llamacpp_sycl() {
 
     ONEAPI_BIN=$(dirname "$ICX_BIN")
     export PATH="$ONEAPI_BIN:$PATH"
+    export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
 
     # Source setvars.sh if it exists (sets library paths), otherwise set manually
     if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
@@ -288,7 +318,8 @@ download_model() {
         OK "Model already present: $MODEL_PATH"
     else
         INFO "Downloading from Hugging Face — grab a coffee ☕…"
-        wget -q --show-progress -O "$MODEL_PATH" "$MODEL_URL"
+        wget --continue --tries=5 --timeout=30 \
+    --show-progress -O "$MODEL_PATH" "$MODEL_URL"
         OK "Model saved → $MODEL_PATH"
     fi
 }
@@ -474,7 +505,13 @@ print_summary() {
     echo -e "${W}  Or use the manager:${N}"
     echo -e "  ${C}bash ~/ai_stack_manager.sh${N}"
     echo ""
+    echo -e "${W}  Test the API:${N}"
+    echo -e "  ${C}curl http://localhost:8080/v1/chat/completions \\"
+    echo -e "    -H 'Content-Type: application/json' \\"
+    echo -e "    -d '{\"model\":\"llama\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}'${N}"
+    echo ""
     WARN "Re-login (or reboot) before first use — required for Intel GPU group membership and oneAPI env."
+    sleep 5
 }
 
 # ================================================================
@@ -492,6 +529,7 @@ source "\$HOME/.cargo/env" 2>/dev/null || true
 export ONEAPI_DEVICE_SELECTOR="level_zero:0"
 export SYCL_DEVICE_FILTER="level_zero:gpu"
 export PATH="\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH"
+export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
 
 LLAMA_SERVER="$LLAMACPP_BIN"
 MODEL="$MODEL_PATH"
@@ -550,6 +588,7 @@ main() {
     preflight
     install_system_deps
     install_intel_gpu_drivers
+    write_uninstall_script
 echo "Skiping Rust Install..."   # install_rust
     install_llamacpp_sycl
     download_model
@@ -558,7 +597,6 @@ echo "Skipping AnythingLLM install..."   # install_anythingllm
     configure_shell
     write_startup_script
     print_summary
-    sleep 10
 }
 
 main "$@"
