@@ -550,14 +550,15 @@ main() {
     preflight
     install_system_deps
     install_intel_gpu_drivers
-    install_rust
+echo "Skiping Rust Install..."   # install_rust
     install_llamacpp_sycl
     download_model
     install_memu
-    install_anythingllm
+echo "Skipping AnythingLLM install..."   # install_anythingllm
     configure_shell
     write_startup_script
     print_summary
+    sleep 10
 }
 
 main "$@"
