@@ -457,4 +457,5 @@ streamlit_alive \
     && echo -e "  ${G}🟢 Streamlit  →  ${C}${URL}${N}" \
     || echo -e "  ${R}🔴 Streamlit :${STREAMLIT_PORT}${N}"
 sep
+sleep 5
 echo ""
