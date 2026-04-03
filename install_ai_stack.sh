@@ -46,6 +46,10 @@ ask() {
 }
 PAUSE() { read -rp "$(echo -e "${Y}  Press Enter to continue…${N}")"; }
 
+# ── User config (set during install) ─────────────────────────────
+ENABLE_DEBUG=0
+ENABLE_BITNET=0
+
 # ================================================================
 #  PREFLIGHT
 # ================================================================
@@ -92,6 +96,25 @@ install_system_deps() {
         gpg-agent software-properties-common \
         ocl-icd-libopencl1           # OpenCL ICD loader
     OK "System packages installed."
+}
+
+configure_options() {
+    STEP "Configuration"
+
+    if ask "Enable debug mode (verbose build logs)?" "n"; then
+        ENABLE_DEBUG=1
+        set -x
+        INFO "Debug mode enabled."
+    else
+        INFO "Debug mode disabled."
+    fi
+
+    if ask "Enable BitNet support (experimental)?" "n"; then
+        ENABLE_BITNET=1
+        INFO "BitNet support enabled."
+    else
+        INFO "BitNet disabled."
+    fi
 }
 
 # ================================================================
@@ -203,6 +226,9 @@ https://apt.repos.intel.com/oneapi all main" \
     fi
 }
 
+# ================================================================
+#  STEP 3 — Uninstall
+# ================================================================
 write_uninstall_script() {
     STEP "3/7 Writing uninstall script"
     cat > "$INSTALL_DIR/uninstall.sh" <<EOF
@@ -217,9 +243,7 @@ EOF
     OK "Uninstall script created → $INSTALL_DIR/uninstall.sh"
 }
 
-# ================================================================
-#  STEP 3 — Rust
-# ================================================================
+
 install_rust() {
     STEP "3/7  Rust toolchain"
     if command -v cargo &>/dev/null; then
@@ -244,8 +268,6 @@ install_llamacpp_sycl() {
     fi
 
     # ── Locate Intel icx/icpx compilers ──────────────────────────
-    # setvars.sh may not exist if only the compiler package (not full
-    # toolkit) is installed. Find icx directly in the oneAPI tree.
     local ICX_BIN ICPX_BIN ONEAPI_BIN
     ICX_BIN=$(command -v icx 2>/dev/null) \
         || ICX_BIN=$(find /opt/intel/oneapi -name icx  -type f 2>/dev/null | sort -r | head -1) \
@@ -260,13 +282,14 @@ install_llamacpp_sycl() {
 
     ONEAPI_BIN=$(dirname "$ICX_BIN")
     export PATH="$ONEAPI_BIN:$PATH"
+
+    # ── SYCL performance tweak ───────────────────────────────────
     export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
 
-    # Source setvars.sh if it exists (sets library paths), otherwise set manually
+    # ── Source environment ───────────────────────────────────────
     if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
         source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
     else
-        # Find the SYCL runtime lib dir and add it
         local SYCL_LIB
         SYCL_LIB=$(find /opt/intel/oneapi -name "libsycl.so*" -type f 2>/dev/null \
                    | head -1 | xargs dirname 2>/dev/null) || true
@@ -275,12 +298,12 @@ install_llamacpp_sycl() {
 
     OK "Using Intel compilers: $ICX_BIN / $ICPX_BIN"
 
-    # Extra build deps
+    # ── Extra build deps ─────────────────────────────────────────
     INFO "Installing build dependencies…"
     sudo apt-get install -y --no-install-recommends \
         ninja-build libopenblas-dev
 
-    # Clone or update
+    # ── Clone or update ──────────────────────────────────────────
     if [[ -d "$LLAMACPP_DIR/.git" ]]; then
         INFO "Updating llama.cpp repo…"
         git -C "$LLAMACPP_DIR" pull --ff-only
@@ -289,16 +312,28 @@ install_llamacpp_sycl() {
         git clone --depth=1 "$LLAMACPP_REPO" "$LLAMACPP_DIR"
     fi
 
-    INFO "Configuring cmake with SYCL backend…"
+    # ── BitNet toggle (interactive config) ───────────────────────
+    local BITNET_FLAG=""
+    if [[ "${ENABLE_BITNET:-0}" == "1" ]]; then
+        BITNET_FLAG="-DGGML_USE_BITNET=ON"
+        INFO "BitNet support: ENABLED"
+    else
+        INFO "BitNet support: disabled"
+    fi
+
+    # ── Configure ────────────────────────────────────────────────
+    INFO "Configuring cmake with SYCL backend${BITNET_FLAG:+ + BitNet}…"
     cmake -B "$LLAMACPP_DIR/build" \
         -S "$LLAMACPP_DIR" \
         -G Ninja \
         -DGGML_SYCL=ON \
+        $BITNET_FLAG \
         -DCMAKE_C_COMPILER="$ICX_BIN" \
         -DCMAKE_CXX_COMPILER="$ICPX_BIN" \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_SYCL_F16=ON
 
+    # ── Build ────────────────────────────────────────────────────
     INFO "Building llama.cpp (using $(nproc) cores — takes a few minutes)…"
     cmake --build "$LLAMACPP_DIR/build" --config Release -j"$(nproc)"
 
@@ -587,6 +622,7 @@ main() {
 
     preflight
     install_system_deps
+    configure_options
     install_intel_gpu_drivers
     write_uninstall_script
 echo "Skiping Rust Install..."   # install_rust
