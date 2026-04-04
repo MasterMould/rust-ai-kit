@@ -1,39 +1,34 @@
-write_scripts() {
-    INSTALL_DIR="$HOME/ai_stack"
-    BIN="$INSTALL_DIR/llama.cpp/build/bin/llama-server"
-    LOG="$INSTALL_DIR/engine.log"
-    PID_FILE="$INSTALL_DIR/.engine.pid"
+#!/bin/bash
+
+create_runtime_scripts() {
+    STEP "Creating runtime scripts"
 
     mkdir -p "$INSTALL_DIR"
 
-    # ── START SCRIPT ─────────────────────────────
     cat > "$INSTALL_DIR/start_ai_stack.sh" <<EOF
 #!/bin/bash
-mkdir -p "$INSTALL_DIR"
-nohup "$BIN" --port 8080 > "$LOG" 2>&1 &
-echo \$! > "$PID_FILE"
-echo "🚀 AI stack started (PID \$(cat $PID_FILE))"
+source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
+export ONEAPI_DEVICE_SELECTOR="level_zero:0"
+
+$LLAMACPP_BIN \
+  --model "$MODEL_PATH" \
+  --ctx-size $DEFAULT_CTX \
+  --n-gpu-layers 99 \
+  --port 8080
 EOF
 
-    # ── STOP SCRIPT ─────────────────────────────
-    cat > "$INSTALL_DIR/stop_ai_stack.sh" <<EOF
+    cat > "$INSTALL_DIR/stop_ai_stack.sh" <<'EOF'
 #!/bin/bash
-PID_FILE="$PID_FILE"
+echo "🛑 Stopping AI stack..."
 
-if [[ -f "\$PID_FILE" ]]; then
-    PID=\$(cat "\$PID_FILE")
-    if kill -0 "\$PID" 2>/dev/null; then
-        kill "\$PID"
-        echo "🛑 Stopped AI stack (PID \$PID)"
-    else
-        echo "⚠️ Process not running"
-    fi
-    rm -f "\$PID_FILE"
-else
-    echo "⚠️ No PID file found"
-fi
+pkill -f llama-server && echo "Stopped llama-server" || echo "llama-server not running"
+pkill -f memu && echo "Stopped memory server" || true
+pkill -f searxng && echo "Stopped search proxy" || true
+
+echo "✅ All services stopped."
 EOF
 
-    chmod +x "$INSTALL_DIR/start_ai_stack.sh"
-    chmod +x "$INSTALL_DIR/stop_ai_stack.sh"
+    chmod +x "$INSTALL_DIR/"*.sh
+
+    OK "Runtime scripts ready"
 }
