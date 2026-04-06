@@ -6,7 +6,7 @@ main_menu() {
         echo "🦀 Local AI Stack"
         echo "1) Full Install"
         echo "2) Build Engine"
-        echo "3) Download Model"
+        echo "3) Model Manager"
         echo "4) Start AI"
         echo "5) Stop AI"
         echo "0) Exit"
@@ -18,7 +18,7 @@ main_menu() {
                 install_system_deps
                 install_intel_gpu
                 install_llamacpp
-                download_model
+                model_menu
                 create_runtime_scripts
                 ;;
             2) install_llamacpp ;;
