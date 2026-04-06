@@ -74,8 +74,10 @@ select_model() {
     MODEL_PATH="$MODEL_DIR/$MODEL_FILE"
 
     OK "Selected: $MODEL_NAME"
-}
 
+    read -rp "Download now? (y/n): " yn
+    [[ "$yn" =~ ^[Yy]$ ]] && download_model
+}
 # ─────────────────────────────────────────────
 # Custom Model Input
 # ─────────────────────────────────────────────
