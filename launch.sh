@@ -257,7 +257,7 @@ _start_engine_once() {
         --ctx-size     8192 \
         --n-gpu-layers "$GPU_LAYERS" \
         --port         "$ENGINE_PORT" \
-        --host         0.0.0.0 \
+        --host         127.0.0.1 \
         --api-key      local \
         >> "$LOG_DIR/engine.log" 2>&1 &
 

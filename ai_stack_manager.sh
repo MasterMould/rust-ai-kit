@@ -126,6 +126,7 @@ show_menu() {
     echo ""
     echo -e "${W}  Models${N}"
     echo "  14) Model Manager  (download · switch · delete)"
+    echo "  16) LLM Command Shell  (llama-server / llama-cli · HuggingFace · custom)"
     echo ""
     if _ui_enabled; then
         echo "  15) Disable Web UI  (AnythingLLM)"
@@ -280,7 +281,7 @@ start_stack() {
         --ctx-size      8192
         --n-gpu-layers  "$GPU_LAYERS"
         --port          "$ENGINE_PORT"
-        --host          0.0.0.0
+        --host          127.0.0.1
         --api-key       local
     )
 
@@ -1014,6 +1015,227 @@ toggle_ui() {
     PAUSE
 }
 
+
+# ================================================================
+#  16. LLM COMMAND SHELL
+#  Run llama-server or llama-cli with arbitrary flags — including
+#  the -hf <repo>:<quant> HuggingFace auto-download syntax.
+#
+#  Sub-options:
+#   a) llama-server -hf …   — replace running engine with a HF model
+#   b) llama-cli    -hf …   — interactive CLI session (server stays up)
+#   c) Custom command       — any llama binary + args you type
+# ================================================================
+llm_command_shell() {
+    local LLAMACPP_BIN_DIR
+    LLAMACPP_BIN_DIR="$(dirname "$LLAMACPP_BIN")"
+    local LLAMA_CLI="$LLAMACPP_BIN_DIR/llama-cli"
+    local LLAMA_SRV="$LLAMACPP_BIN_DIR/llama-server"
+
+    _source_envs
+
+    # ── Sanity: binaries must exist ───────────────────────────────
+    if [[ ! -f "$LLAMA_SRV" ]]; then
+        ERR "llama-server not found at $LLAMA_SRV"
+        INFO "Run Install (option 1) first."
+        PAUSE; return
+    fi
+    if [[ ! -f "$LLAMA_CLI" ]]; then
+        WARN "llama-cli not found at $LLAMA_CLI"
+        WARN "It may not have been built — only llama-server will be available."
+    fi
+
+    while true; do
+        clear
+        echo -e "${B}${W}"
+        echo "  ╔══════════════════════════════════════════════════════════════╗"
+        echo "  ║   🛠   LLM COMMAND SHELL                                      ║"
+        echo "  ║        Run llama binaries with custom flags / HF models       ║"
+        echo "  ╚══════════════════════════════════════════════════════════════╝"
+        echo -e "${N}"
+
+        # Show engine status inline so user knows if server is live
+        if pgrep -f "llama-server" &>/dev/null; then
+            echo -e "  Engine: ${G}● running${N}  (port $ENGINE_PORT)"
+        else
+            echo -e "  Engine: ${R}○ stopped${N}"
+        fi
+        echo ""
+        echo -e "${W}  a)  llama-server  — start with HuggingFace model or custom flags${N}"
+        echo "       Stops the running engine, launches with your spec, then"
+        echo "       offers to restore the original stack when you're done."
+        echo ""
+        echo -e "${W}  b)  llama-cli     — interactive CLI session${N}"
+        echo "       Runs in the foreground (Ctrl-C to exit). The background"
+        echo "       server stays up; be mindful of shared VRAM."
+        echo ""
+        echo -e "${W}  c)  Custom command — type any llama binary + arguments${N}"
+        echo "       Full path is inserted automatically; just supply the flags."
+        echo ""
+        echo "  0)  Back to main menu"
+        echo ""
+        echo -n "  Select [a/b/c/0]: "
+        read -r sub_opt
+
+        case "${sub_opt,,}" in
+
+            # ── A: llama-server with HF or custom flags ───────────
+            a)
+                clear
+                STEP "llama-server — HuggingFace / custom launch"
+                echo ""
+                echo -e "  ${W}Examples:${N}"
+                echo "    -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S"
+                echo "    -hf unsloth/Llama-3.2-3B-Instruct-GGUF:*Q4_K_M*"
+                echo "    --model $MODEL_DIR/my-model.gguf --ctx-size 4096"
+                echo ""
+                echo -e "  ${Y}Note: the running engine will be stopped first.${N}"
+                echo -e "  ${Y}Default flags added automatically:${N}"
+                echo "    --n-gpu-layers 99  --port $ENGINE_PORT  --host 0.0.0.0  --api-key local"
+                echo ""
+                echo -n "  Extra flags / HF spec: "
+                read -r srv_flags
+                [[ -z "$srv_flags" ]] && { WARN "No flags entered — aborting."; sleep 1; continue; }
+
+                # Stop existing server
+                echo ""
+                INFO "Stopping existing engine…"
+                pkill -f "llama-server" 2>/dev/null || true
+                sleep 1
+
+                # Build command (preserve HF quoting exactly as typed)
+                local -a SRV_CMD=(
+                    "$LLAMA_SRV"
+                    --n-gpu-layers 99
+                    --port          "$ENGINE_PORT"
+                    --host          0.0.0.0
+                    --api-key       local
+                )
+                # Append user flags via eval-safe word splitting
+                local -a usr_srv_args
+                IFS=' ' read -ra usr_srv_args <<< "$srv_flags"
+                SRV_CMD+=("${usr_srv_args[@]}")
+
+                echo ""
+                INFO "Launching: ${SRV_CMD[*]}"
+                echo -e "  ${Y}(Ctrl-C to stop — you will be offered to restore the stack)${N}"
+                echo ""
+
+                # Run in foreground so output streams live
+                ONEAPI_DEVICE_SELECTOR="level_zero:0" \
+                SYCL_DEVICE_FILTER="level_zero:gpu" \
+                "${SRV_CMD[@]}" || true
+
+                echo ""
+                INFO "llama-server exited."
+                if ask "Restart the normal stack now?"; then
+                    start_stack
+                else
+                    INFO "Stack left stopped. Use option 2 to restart when ready."
+                    PAUSE
+                fi
+                ;;
+
+            # ── B: llama-cli interactive session ─────────────────
+            b)
+                clear
+                STEP "llama-cli — interactive session"
+
+                if [[ ! -f "$LLAMA_CLI" ]]; then
+                    ERR "llama-cli not found. It may not be built in your llama.cpp version."
+                    PAUSE; continue
+                fi
+
+                echo ""
+                echo -e "  ${W}Examples:${N}"
+                echo "    -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S"
+                echo "    -hf unsloth/Llama-3.2-3B-Instruct-GGUF:*Q4_K_M*  -cnv"
+                echo "    --model $MODEL_DIR/my-model.gguf -p 'Hello!' -cnv"
+                echo ""
+
+                # Warn if server is also running (VRAM competition)
+                if pgrep -f "llama-server" &>/dev/null; then
+                    echo -e "  ${Y}⚠  llama-server is running and using VRAM.${N}"
+                    echo -e "  ${Y}   Loading a second model may exhaust VRAM on 16 GB.${N}"
+                    echo -e "  ${Y}   Tip: use the same gguf the server already loaded to avoid a second load.${N}"
+                    echo ""
+                    ask "Continue anyway?" n || continue
+                fi
+
+                echo -e "  ${Y}Default flags added automatically:${N}"
+                echo "    --n-gpu-layers 99"
+                echo ""
+                echo -n "  Extra flags / HF spec: "
+                read -r cli_flags
+                [[ -z "$cli_flags" ]] && { WARN "No flags entered — aborting."; sleep 1; continue; }
+
+                local -a CLI_CMD=("$LLAMA_CLI" --n-gpu-layers 99)
+                local -a usr_cli_args
+                IFS=' ' read -ra usr_cli_args <<< "$cli_flags"
+                CLI_CMD+=("${usr_cli_args[@]}")
+
+                echo ""
+                INFO "Launching: ${CLI_CMD[*]}"
+                echo -e "  ${Y}(Type /bye or Ctrl-C to exit the session)${N}"
+                echo ""
+
+                ONEAPI_DEVICE_SELECTOR="level_zero:0" \
+                SYCL_DEVICE_FILTER="level_zero:gpu" \
+                "${CLI_CMD[@]}" || true
+
+                echo ""
+                OK "llama-cli session ended."
+                PAUSE
+                ;;
+
+            # ── C: fully custom command ───────────────────────────
+            c)
+                clear
+                STEP "Custom llama command"
+                echo ""
+                echo -e "  ${W}Available binaries in $LLAMACPP_BIN_DIR:${N}"
+                ls "$LLAMACPP_BIN_DIR" 2>/dev/null | sed 's/^/    /' || WARN "Cannot list bin dir."
+                echo ""
+                echo -e "  ${W}SYCL envs are set automatically.${N}"
+                echo -e "  Enter the binary name + flags (binary path prefix inserted for you)."
+                echo -e "  Example:  ${C}llama-server -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S${N}"
+                echo ""
+                echo -n "  Command: "
+                read -r custom_cmd
+                [[ -z "$custom_cmd" ]] && { WARN "Empty input — aborting."; sleep 1; continue; }
+
+                # Extract binary name (first word) and prepend bin dir
+                local bin_name args_rest
+                bin_name=$(echo "$custom_cmd" | awk '{print $1}')
+                args_rest=$(echo "$custom_cmd" | cut -d' ' -f2-)
+                local full_bin="$LLAMACPP_BIN_DIR/$bin_name"
+
+                if [[ ! -f "$full_bin" ]]; then
+                    WARN "Binary not found: $full_bin"
+                    WARN "Trying to run as-is from PATH…"
+                    full_bin="$bin_name"
+                fi
+
+                echo ""
+                INFO "Running: $full_bin $args_rest"
+                echo -e "  ${Y}(Ctrl-C to interrupt)${N}"
+                echo ""
+
+                ONEAPI_DEVICE_SELECTOR="level_zero:0" \
+                SYCL_DEVICE_FILTER="level_zero:gpu" \
+                eval "$full_bin $args_rest" || true
+
+                echo ""
+                OK "Command exited."
+                PAUSE
+                ;;
+
+            0) return ;;
+            *) WARN "Invalid option."; sleep 1 ;;
+        esac
+    done
+}
+
 # ================================================================
 main() {
     while true; do
@@ -1035,6 +1257,7 @@ main() {
             13) uninstall           ;;
             14) manage_models       ;;
             15) toggle_ui           ;;
+            16) llm_command_shell  ;;
             0)  echo "Bye!"; exit 0 ;;
             *)  WARN "Invalid option."; sleep 1 ;;
         esac
