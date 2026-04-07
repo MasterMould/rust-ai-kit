@@ -231,7 +231,7 @@ def main():
             st.caption(f"📚 {len(RAGManager.list_docs())} docs")
 
         with st.expander("System prompt"):
-            sp = st.text_area("", value=st.session_state.system_prompt, height=100)
+            sp = st.text_area("System Prompt", value=st.session_state.system_prompt, height=100, label_visibility="collapsed")
             if st.button("Update"):
                 st.session_state.system_prompt = sp
                 st.success("Updated")
