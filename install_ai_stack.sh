@@ -5,6 +5,8 @@
 #  Components: WasmEdge+GGML-SYCL · LlamaEdge · MemU · AnythingLLM
 # ================================================================
 
+# Put this in .bashrc to access llama server & CLI: export PATH="$HOME/ai_stack/llama.cpp/build/bin:$PATH"
+
 set -euo pipefail
 
 # ── Colours ─────────────────────────────────────────────────────
@@ -41,6 +43,7 @@ ask() {
     r="${r:-${2:-y}}"
     [[ "${r,,}" == "y" ]]
 }
+
 PAUSE() { read -rp "$(echo -e "${Y}  Press Enter to continue…${N}")"; }
 
 # ================================================================
