@@ -156,7 +156,7 @@ install-autostart:
 git-sync:
 	git add .
 	git commit -m "Station Sync: $$(date)"
-	git push origin main
+	git push 
 
 # ================================================================
 #  stop  — Streamlit and the AI stack
