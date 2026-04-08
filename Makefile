@@ -159,7 +159,7 @@ git-sync:
 	git push origin main
 
 # ================================================================
-#  stop  — kill Streamlit and the AI stack
+#  stop  — Streamlit and the AI stack
 # ================================================================
 stop:
 	@echo "▶  Stopping Streamlit…"
@@ -170,6 +170,32 @@ stop:
 	fi
 	@echo "▶  Stopping AI stack (delegating to ai_stack_manager.sh)…"
 	@echo "3" | bash ai_stack_manager.sh 2>/dev/null || true
+
+# ================================================================
+#  stop  — Streamlit only
+# ================================================================
+stop-streamlit:
+	@echo "▶  Stopping Streamlit…"
+	@pkill -f "streamlit run" 2>/dev/null && echo "  Stopped Streamlit" || echo "  Streamlit not running"
+	@if [ -f logs/.streamlit_pid ]; then \
+	    kill $$(cat logs/.streamlit_pid) 2>/dev/null || true; \
+	    rm -f logs/.streamlit_pid; \
+	fi
+
+# ================================================================
+#  stop  — the AI stack only
+# ================================================================
+stop-AIstack:
+	@echo "▶  Stopping Streamlit…"
+	@pkill -f "streamlit run" 2>/dev/null && echo "  Stopped Streamlit" || echo "  Streamlit not running"
+	@if [ -f logs/.streamlit_pid ]; then \
+	    kill $$(cat logs/.streamlit_pid) 2>/dev/null || true; \
+	    rm -f logs/.streamlit_pid; \
+	fi
+	@echo "▶  Stopping AI stack (delegating to ai_stack_manager.sh)…"
+	@echo "3" | bash ai_stack_manager.sh 2>/dev/null || true
+
+
 
 # ================================================================
 #  status  — quick health check
@@ -213,4 +239,4 @@ lint:
 test:
 	$(VENV)/bin/pytest tests/ -v 2>/dev/null || echo "No tests yet"
 
-.PHONY: setup run launch install-desktop install-autostart git-sync stop status add-user lint test
+.PHONY: setup run launch install-desktop install-autostart git-sync stop stop-streamlit stop-AIstack status add-user lint test
