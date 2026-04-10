@@ -2,7 +2,7 @@
 # ================================================================
 #  🤖  LOCAL AI STACK INSTALLER  —  Ubuntu 24.04
 #  GPU: Intel Arc A770 (SYCL/oneAPI backend)
-#  Components: WasmEdge+GGML-SYCL · LlamaEdge · MemU · Search Proxy
+#  Components: WasmEdge+GGML-SYCL · LlamaEdge · MemU · AnythingLLM
 # ================================================================
 
 set -euo pipefail
@@ -28,7 +28,7 @@ APPS_DIR="$HOME/Applications"
 LLAMACPP_REPO="https://github.com/ggerganov/llama.cpp"
 LLAMACPP_DIR="$INSTALL_DIR/llama.cpp"
 LLAMACPP_BIN="$LLAMACPP_DIR/build/bin/llama-server"
-Search Proxy_APPIMAGE_URL="https://cdn.Search Proxy.com/latest/Search ProxyDesktop-x86_64.AppImage"
+ANYTHINGLLM_APPIMAGE_URL="https://cdn.anythingllm.com/latest/AnythingLLMDesktop-x86_64.AppImage"
 
 # ── Model choice ─────────────────────────────────────────────────
 # A770 has 16 GB VRAM — use a proper 8B model instead of the tiny 1B
@@ -60,7 +60,7 @@ preflight() {
     echo -e "${W}  GPU detection:${N}"
 # Method 1    
         if clinfo | grep -i "Device Name" | grep -iq "Arc"; then
-    OK " Intel Arc GPU visible via OpenCL."
+    OK "  Intel Arc GPU visible via OpenCL"
     else
         WARN "  Intel Arc GPU NOT fully visible via OpenCL"
     fi
@@ -68,13 +68,11 @@ preflight() {
 # Method 2
     
     if lspci | grep -qi "Arc A770"; then
-        OK " Intel Arc A770 detected via LSPCI."
+        OK "Intel Arc A770 detected."
     else
         WARN "Could not confirm Arc A770 via lspci. Proceeding anyway — verify your GPU."
         lspci | grep -i "VGA\|Display\|3D" || true
     fi
-
-    sleep 5
 
     echo ""
     INFO "Available disk: $(df -h "$HOME" | awk 'NR==2{print $4}') free"
@@ -89,7 +87,6 @@ preflight() {
 install_system_deps() {
     STEP "1/7  System packages"
     sudo apt-get update -qq
-    sudo apt autoremove
     sudo apt-get install -y --no-install-recommends \
         curl wget git build-essential cmake pkg-config \
         libssl-dev ca-certificates unzip file libfuse2 \
@@ -101,13 +98,6 @@ install_system_deps() {
 
 configure_options() {
     STEP "Configuration"
-
-    # Generate secure API key
-    if [[ ! -f "$INSTALL_DIR/.env" ]]; then
-        SECURE_KEY=$(openssl rand -hex 16)
-        echo "LLAMA_API_KEY=$SECURE_KEY" > "$INSTALL_DIR/.env"
-        OK "Generated secure API key."
-    fi
 
     if ask "Enable debug mode (verbose build logs)?" "n"; then
         ENABLE_DEBUG=1
@@ -277,8 +267,8 @@ else
 fi
 
 # Clean up desktop + symlinks
-rm -f "$HOME/.local/bin/Search Proxy" 2>/dev/null || true
-rm -f "$HOME/.local/share/applications/Search Proxy.desktop" 2>/dev/null || true
+rm -f "$HOME/.local/bin/anythingllm" 2>/dev/null || true
+rm -f "$HOME/.local/share/applications/anythingllm.desktop" 2>/dev/null || true
 
 echo ""
 echo "✅ Uninstall complete."
@@ -288,6 +278,7 @@ EOF
     chmod +x "$UNINSTALL_PATH"
     OK "Uninstall script created → $UNINSTALL_PATH"
 }
+
 
 install_rust() {
     STEP "3/7  Rust toolchain"
@@ -302,15 +293,69 @@ install_rust() {
 }
 
 # ================================================================
+#  UPDATE — llama.cpp (fast path rebuild)
+# ================================================================
+update_llamacpp() {
+    STEP "Updating llama.cpp (pull + rebuild)"
+
+    if [[ ! -d "$LLAMACPP_DIR/.git" ]]; then
+        ERR "llama.cpp not installed yet. Run full installer first."
+    fi
+
+    INFO "Pulling latest changes…"
+    git -C "$LLAMACPP_DIR" fetch --all
+    git -C "$LLAMACPP_DIR" reset --hard origin/master
+
+    # ── Locate Intel compilers again ─────────────────────────────
+    local ICX_BIN ICPX_BIN
+    ICX_BIN=$(command -v icx 2>/dev/null) \
+        || ICX_BIN=$(find /opt/intel/oneapi -name icx -type f 2>/dev/null | head -1)
+
+    ICPX_BIN=$(command -v icpx 2>/dev/null) \
+        || ICPX_BIN=$(find /opt/intel/oneapi -name icpx -type f 2>/dev/null | head -1)
+
+    [[ -z "$ICX_BIN" || -z "$ICPX_BIN" ]] && ERR "Intel compilers not found."
+
+    export PATH="$(dirname "$ICX_BIN"):$PATH"
+    export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
+
+    # Load oneAPI env if present
+    [[ -f /opt/intel/oneapi/setvars.sh ]] && \
+        source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
+
+    # Optional BitNet
+    local BITNET_FLAG=""
+    [[ "${ENABLE_BITNET:-0}" == "1" ]] && BITNET_FLAG="-DGGML_USE_BITNET=ON"
+
+    INFO "Reconfiguring build…"
+    cmake -B "$LLAMACPP_DIR/build" \
+        -S "$LLAMACPP_DIR" \
+        -G Ninja \
+        -DGGML_SYCL=ON \
+        $BITNET_FLAG \
+        -DCMAKE_C_COMPILER="$ICX_BIN" \
+        -DCMAKE_CXX_COMPILER="$ICPX_BIN" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DGGML_SYCL_F16=ON
+
+    INFO "Rebuilding…"
+    cmake --build "$LLAMACPP_DIR/build" -j"$(nproc)"
+
+    [[ -f "$LLAMACPP_BIN" ]] \
+        && OK "llama.cpp updated successfully 🚀" \
+        || ERR "Update failed — binary missing."
+}
+
+# ================================================================
 #  STEP 4 — llama.cpp built with SYCL (Intel Arc A770)
 # ================================================================
 install_llamacpp_sycl() {
     STEP "4/7  llama.cpp + SYCL backend (Intel Arc A770)"
 
-    if [[ -f "$LLAMACPP_BIN" ]]; then
-        OK "llama-server already built: $LLAMACPP_BIN"
-        return
-    fi
+  #  if [[ -f "$LLAMACPP_BIN" ]]; then
+  #      OK "llama-server already built: $LLAMACPP_BIN"
+  #      return
+  #  fi
 
     # ── Locate Intel icx/icpx compilers ──────────────────────────
     local ICX_BIN ICPX_BIN ONEAPI_BIN
@@ -476,10 +521,33 @@ MEMSTART
 install_memu() { install_memory_server; }   # alias so main() call still works
 
 # ================================================================
-#  STEP 7 — Search Proxy
+#  STEP 7 — AnythingLLM + Search Proxy
 # ================================================================
-install_Search_Proxy() {
-    STEP "7/7 Search Proxy"
+install_anythingllm() {
+    STEP "7/7  AnythingLLM + Search Proxy"
+
+    # ── AnythingLLM ───────────────────────────────────────────────
+    mkdir -p "$APPS_DIR"
+    local ai="$APPS_DIR/AnythingLLM.AppImage"
+    if [[ -f "$ai" ]]; then
+        OK "AnythingLLM already present."
+    elif ask "Download AnythingLLM AppImage?"; then
+        wget -q --show-progress -O "$ai" "$ANYTHINGLLM_APPIMAGE_URL"
+        chmod +x "$ai"
+        mkdir -p "$HOME/.local/share/applications" "$HOME/.local/bin"
+        cat > "$HOME/.local/share/applications/anythingllm.desktop" <<DESK
+[Desktop Entry]
+Name=AnythingLLM
+Exec=$ai
+Icon=utilities-terminal
+Type=Application
+Categories=Office;AI;
+DESK
+        ln -sf "$ai" "$HOME/.local/bin/anythingllm"
+        OK "AnythingLLM installed."
+    else
+        WARN "Skipped AnythingLLM."
+    fi
 
     # ── Search proxy ──────────────────────────────────────────────
     local PROXY_DIR="$INSTALL_DIR/search_proxy"
@@ -518,7 +586,7 @@ PROXYSTART
         chmod +x "$PROXY_DIR/start_search_proxy.sh"
         touch "$PROXY_MARKER"
         OK "Search proxy installed — listens on :8090, forwards to llama-server :8080"
-        INFO "Point Search Proxy at http://localhost:8090 (not 8080) to enable web search."
+        INFO "Point AnythingLLM at http://localhost:8090 (not 8080) to enable web search."
     fi
 }
 
@@ -600,9 +668,8 @@ echo "🤖 Starting AI Stack (Intel Arc A770 / llama.cpp SYCL)…"
     --model "\$MODEL" \\
     --ctx-size 8192 \\
     --n-gpu-layers 99 \\
-    --jinja \\                 # 🟢 CRITICAL: Enables reasoning templates
     --port 8080 \\
-    --host 127.0.0.1 \\
+    --host 0.0.0.0 \\
     --api-key local \\
     > "\$LOGS/engine.log" 2>&1 &
 ENGINE_PID=\$!
@@ -619,8 +686,8 @@ curl -sf http://localhost:8080/v1/models >/dev/null 2>&1 \\
 
 echo "\$ENGINE_PID" > "$INSTALL_DIR/.pids"
 
-# Search Proxy
-command -v Search Proxy &>/dev/null && { Search Proxy &>/dev/null & echo "  ✅ Search Proxy launched."; }
+# AnythingLLM
+command -v anythingllm &>/dev/null && { anythingllm &>/dev/null & echo "  ✅ AnythingLLM launched."; }
 
 echo ""
 echo "🚀 Stack LIVE  —  API: http://localhost:8080"
@@ -648,14 +715,23 @@ main() {
     configure_options
     install_intel_gpu_drivers
     write_uninstall_script
-echo "Skiping Rust Install..."   # install_rust
+    install_rust
     install_llamacpp_sycl
     download_model
     install_memu
-    install_Search_Proxy
+echo "Skipping AnythingLLM install..."   # install_anythingllm
     configure_shell
     write_startup_script
     print_summary
 }
 
+# ================================================================
+#  ARG PARSER
+# ================================================================
+if [[ "${1:-}" == "--update-llama" ]]; then
+    update_llamacpp
+    exit 0
+fi
+
 main "$@"
+
