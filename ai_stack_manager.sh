@@ -2,7 +2,7 @@
 # ================================================================
 #  🤖  RUST-AI STACK MANAGER  —  Ubuntu 24.04
 #  GPU: Intel Arc A770 (SYCL/oneAPI backend)
-#  Components: llama.cpp/SYCL · MemU · AnythingLLM · SearXNG
+#  Components: llama.cpp/SYCL · MemU · SearXNG
 # ================================================================
 # NOTE: No set -euo pipefail here — this is an interactive menu script.
 # Strict mode causes silent exits on any non-zero command (e.g. a grep
@@ -15,19 +15,10 @@ MODEL_DIR="$INSTALL_DIR/models"
 MEM_DIR="$INSTALL_DIR/memory_server"
 PROXY_DIR="$INSTALL_DIR/search_proxy"
 MODEL_CONFIG="$INSTALL_DIR/.active_model"   # persists chosen model across sessions
-UI_CONFIG="$INSTALL_DIR/.ui_enabled"        # persists UI on/off preference
 LLAMACPP_BIN="$INSTALL_DIR/llama.cpp/build/bin/llama-server"
 LOG_DIR="$INSTALL_DIR/logs"
 PID_FILE="$INSTALL_DIR/.pids"
-APPS_DIR="$HOME/Applications"
-ANYTHINGLLM_BIN="$HOME/.local/bin/anythingllm"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
-
-# ── UI enabled state ──────────────────────────────────────────────
-_ui_enabled() {
-    # Default ON if config file absent; OFF if file contains "off"
-    [[ ! -f "$UI_CONFIG" ]] || [[ "$(cat "$UI_CONFIG" 2>/dev/null)" != "off" ]]
-}
 
 # ── Read active model from config (falls back to first .gguf found) ─
 _load_active_model() {
@@ -117,22 +108,14 @@ show_menu() {
     echo "  7)  Disable Auto-Start"
     echo ""
     echo -e "${W}  Setup & Tools${N}"
-    echo "  8)  AnythingLLM Connection Guide"
-    echo "  9)  Setup Web Search (SearXNG)"
-    echo "  10) View Logs"
-    echo "  11) Validate Stack (memory · search · engine)"
-    echo "  12) Benchmark GPU (quick inference test)"
-    echo "  13) Uninstall / Clean Up"
+    echo "  8)  Setup Web Search (SearXNG)"
+    echo "  9)  View Logs"
+    echo "  10) Validate Stack (memory · search · engine)"
+    echo "  11) Benchmark GPU (quick inference test)"
+    echo "  12) Uninstall / Clean Up"
     echo ""
     echo -e "${W}  Models${N}"
-    echo "  14) Model Manager  (download · switch · delete)"
-    echo "  16) LLM Command Shell  (llama-server / llama-cli · HuggingFace · custom)"
-    echo ""
-    if _ui_enabled; then
-        echo "  15) Disable Web UI  (AnythingLLM)"
-    else
-        echo "  15) Enable Web UI   (AnythingLLM)"
-    fi
+    echo "  13) Model Manager  (download · switch · delete)"
     echo ""
     echo "  0)  Exit"
     echo -e "${B}  ──────────────────────────────────────────────${N}"
@@ -140,7 +123,7 @@ show_menu() {
 }
 
 _print_quick_status() {
-    local engine_s mem_s proxy_s searxng_s gpu_s ui_s
+    local engine_s mem_s proxy_s searxng_s gpu_s
 
     if pgrep -f "llama-server" &>/dev/null || _svc_running "llamaedge"; then
         engine_s="${G}● running${N}"
@@ -166,18 +149,8 @@ _print_quick_status() {
         gpu_s="${Y}⚠ GPU not detected${N}"
     fi
 
-    if _ui_enabled; then
-        if pgrep -f "AnythingLLM\|anythingllm" &>/dev/null; then
-            ui_s="${G}● running${N}"
-        else
-            ui_s="${Y}○ enabled (not running)${N}"
-        fi
-    else
-        ui_s="${Y}○ disabled${N}"
-    fi
-
     echo -e "  Engine: $engine_s  Memory: $mem_s  GPU: $gpu_s"
-    echo -e "  Proxy:  $proxy_s   Search: $searxng_s  UI: $ui_s"
+    echo -e "  Proxy:  $proxy_s   Search: $searxng_s"
     if [[ -n "${MODEL_PATH:-}" ]]; then
         echo -e "  Model:  ${W}$(basename "$MODEL_PATH")${N}"
     else
@@ -245,14 +218,10 @@ start_stack() {
     STEP "llama-server (llama.cpp SYCL → Arc A770)"
 
     # ── GPU preflight ─────────────────────────────────────────────
-    # Check level-zero can see the GPU before we even try to launch.
-    # Most common cause of "No device of requested type" is the user
-    # not being in the render group yet (requires re-login after install).
     local ze_ok=false
     if command -v clinfo &>/dev/null; then
         clinfo -l 2>/dev/null | grep -qi "intel" && ze_ok=true || true
     fi
-    # Also try ze_info / zeinfo if available
     command -v sycl-ls &>/dev/null && sycl-ls 2>/dev/null | grep -qi "gpu" && ze_ok=true || true
 
     if ! $ze_ok; then
@@ -273,7 +242,7 @@ start_stack() {
     INFO "Context:  8192 tokens"
     INFO "GPU layers: $GPU_LAYERS"
 
-    # ── Launch engine (array form avoids continuation-line shell bugs) ─
+    # ── Launch engine ─────────────────────────────────────────────
     mkdir -p "$LOG_DIR"
     local -a ENGINE_CMD=(
         "$LLAMACPP_BIN"
@@ -281,7 +250,7 @@ start_stack() {
         --ctx-size      8192
         --n-gpu-layers  "$GPU_LAYERS"
         --port          "$ENGINE_PORT"
-        --host          127.0.0.1
+        --host          0.0.0.0
         --api-key       local
     )
 
@@ -322,7 +291,7 @@ start_stack() {
         sleep 2
         if kill -0 "$proxy_pid" 2>/dev/null; then
             OK "Search proxy started (PID $proxy_pid) → http://localhost:8090"
-            INFO "Point AnythingLLM at :8090 (not :8080) to enable web search"
+            INFO "Point your client at :8090 (not :8080) to enable web search"
         else
             WARN "Search proxy exited — check: tail $LOG_DIR/proxy.log"
         fi
@@ -330,25 +299,9 @@ start_stack() {
         INFO "Search proxy not installed — run Install (option 1) to set it up."
     fi
 
-    STEP "AnythingLLM UI"
-    if _ui_enabled; then
-        if command -v anythingllm &>/dev/null; then
-            anythingllm &>/dev/null &
-            OK "AnythingLLM launched."
-        elif [[ -f "$APPS_DIR/AnythingLLM.AppImage" ]]; then
-            "$APPS_DIR/AnythingLLM.AppImage" &>/dev/null &
-            OK "AnythingLLM launched."
-        else
-            WARN "AnythingLLM not found — run Install (option 1)."
-        fi
-    else
-        INFO "UI is disabled — AnythingLLM not started."
-        INFO "API available directly at http://localhost:8090/v1"
-        INFO "Toggle with option 15."
-    fi
-
     echo ""
     OK "Stack is LIVE → http://localhost:$ENGINE_PORT"
+    INFO "API available at http://localhost:8090/v1  (with web search)"
     echo -e "  ${W}Logs:${N} $LOG_DIR/"
     PAUSE
 }
@@ -356,7 +309,6 @@ start_stack() {
 # ================================================================
 #  3. STOP
 # ================================================================
-# Internal silent stop — no PAUSE, used by restart and systemd setup
 _stop_stack_silent() {
     local stopped=0
     if systemctl --user is-active llamaedge.service &>/dev/null; then
@@ -466,7 +418,7 @@ check_status() {
 }
 
 # ================================================================
-#  5. SYSTEMD — ARC A770 AWARE
+#  6 & 7. SYSTEMD — ARC A770 AWARE
 # ================================================================
 setup_systemd() {
     STEP "Systemd user services (Arc A770 / SYCL)"
@@ -475,12 +427,10 @@ setup_systemd() {
     [[ -f "$LLAMACPP_BIN" ]] \
         || { ERR "llama-server not found. Run Install first."; PAUSE; return; }
     [[ -n "$MODEL_PATH" ]] \
-        || { ERR "No active model set. Use option 12 (Model Manager) first."; PAUSE; return; }
+        || { ERR "No active model set. Use option 13 (Model Manager) first."; PAUSE; return; }
 
     mkdir -p "$SYSTEMD_DIR" "$LOG_DIR"
 
-    # The systemd unit reads the active model from MODEL_CONFIG at each start,
-    # so switching models via option 12 automatically applies on next restart.
     cat > "$SYSTEMD_DIR/llamaedge.service" <<EOF
 [Unit]
 Description=llama-server (llama.cpp SYCL — Intel Arc A770)
@@ -524,7 +474,7 @@ disable_systemd() {
 }
 
 # ================================================================
-#  7. SEARXNG
+#  8. SEARXNG
 # ================================================================
 setup_web_search() {
     STEP "SearXNG private web search"
@@ -542,8 +492,6 @@ setup_web_search() {
     fi
     command -v docker &>/dev/null && ! docker info &>/dev/null 2>&1 && DOCKER="sudo docker"
 
-    # Write settings.yml with JSON format enabled (required for API use).
-    # Without this SearXNG returns 403 on all format=json requests.
     mkdir -p "$SEARXNG_CONFIG_DIR"
     cat > "$SEARXNG_CONFIG_DIR/settings.yml" <<'SEARXNG_SETTINGS'
 use_default_settings: true
@@ -574,7 +522,6 @@ SEARXNG_SETTINGS
     done
     if $up; then
         OK "SearXNG live → http://localhost:$SEARXNG_PORT"
-        # Verify JSON works
         if curl -sf "http://localhost:$SEARXNG_PORT/search?q=test&format=json" &>/dev/null; then
             OK "JSON API working — search proxy can now query SearXNG"
         else
@@ -585,14 +532,15 @@ SEARXNG_SETTINGS
     fi
 
     echo ""
-    echo -e "${W}  Connect to AnythingLLM:${N}"
-    echo "  Workspace → Agent Config → Search Provider → SearXNG"
-    echo "  Base URL → http://localhost:$SEARXNG_PORT"
+    echo -e "${W}  API usage:${N}"
+    echo "  Engine (direct):      http://localhost:$ENGINE_PORT/v1"
+    echo "  Engine (web search):  http://localhost:8090/v1"
+    echo "  SearXNG UI:           http://localhost:$SEARXNG_PORT"
     PAUSE
 }
 
 # ================================================================
-#  8. LOGS
+#  9. LOGS
 # ================================================================
 view_logs() {
     clear
@@ -616,7 +564,7 @@ view_logs() {
 }
 
 # ================================================================
-#  9. BENCHMARK (Arc A770)
+#  11. BENCHMARK (Arc A770)
 # ================================================================
 benchmark() {
     STEP "GPU Inference Benchmark"
@@ -654,7 +602,7 @@ benchmark() {
 }
 
 # ================================================================
-#  10. UNINSTALL
+#  12. UNINSTALL
 # ================================================================
 uninstall() {
     WARN "This removes all AI stack files, systemd services, the model, and SearXNG."
@@ -665,9 +613,7 @@ uninstall() {
     rm -f "$SYSTEMD_DIR/llamaedge.service"
     systemctl --user daemon-reload 2>/dev/null || true
     docker rm -f searxng 2>/dev/null || true
-    rm -rf "$INSTALL_DIR" "$APPS_DIR/AnythingLLM.AppImage" \
-           "$HOME/.local/bin/anythingllm" \
-           "$HOME/.local/share/applications/anythingllm.desktop"
+    rm -rf "$INSTALL_DIR"
 
     OK "Uninstall complete."
     INFO "Rust left in place     → remove with: rustup self uninstall"
@@ -676,72 +622,9 @@ uninstall() {
 }
 
 # ================================================================
-#  ANYTHINGLLM SETUP GUIDE
-# ================================================================
-setup_anythingllm() {
-    clear
-    echo -e "${W}${C}  AnythingLLM → llama-server Connection Guide${N}"
-    echo ""
-    echo -e "  AnythingLLM uses the ${W}Generic OpenAI${N} provider to talk to"
-    echo -e "  our local llama-server. Set it up once in the UI:"
-    echo ""
-    echo -e "${W}  ── LLM Provider ──────────────────────────────────${N}"
-    echo "  1. Open AnythingLLM"
-    echo "  2. Click the ⚙️  wrench icon (bottom-left)"
-    echo "  3. AI Providers → LLM"
-    echo "  4. Provider:    Generic OpenAI"
-    echo -e "  5. Base URL:    ${C}http://localhost:8090/v1${N}  ← the search proxy (not 8080)"
-    echo "  6. API Key:     local"
-    echo -e "  7. Model Name:  ${C}llama${N}"
-    echo "  8. Token Limit: 8192"
-    echo "  9. Save Changes"
-    echo ""
-    echo -e "  ${Y}  ℹ️  Port 8090 = search proxy (adds web results automatically)${N}"
-    echo -e "  ${Y}     Port 8080 = llama-server direct (no web search)${N}"
-    echo ""
-    echo -e "${W}  ── Embedding Provider ────────────────────────────${N}"
-    echo "  For RAG / document search, llama-server can serve embeddings"
-    echo "  if you load a second embedding model. Simplest option:"
-    echo ""
-    echo "  AI Providers → Embedding"
-    echo "  Provider:    Generic OpenAI"
-    echo -e "  Base URL:    ${C}http://localhost:8080/v1${N}"
-    echo "  API Key:     local"
-    echo "  Model:       llama   (or load a dedicated embed model)"
-    echo ""
-    echo -e "${W}  ── Memory API (mem0 + ChromaDB) ──────────────────${N}"
-    echo "  The memory server runs on http://localhost:8000"
-    echo ""
-    echo -e "  ${C}# Store a conversation:${N}"
-    echo '  curl -X POST http://localhost:8000/memorize \'
-    echo '    -H "Content-Type: application/json" \'
-    echo '    -d '"'"'{"messages":[{"role":"user","content":"I prefer dark mode"},{"role":"assistant","content":"Got it!"}],"user_id":"me"}'"'"
-    echo ""
-    echo -e "  ${C}# Search memories:${N}"
-    echo '  curl -X POST http://localhost:8000/retrieve \'
-    echo '    -H "Content-Type: application/json" \'
-    echo '    -d '"'"'{"query":"display preferences","user_id":"me"}'"'"
-    echo ""
-    echo -e "  ${C}# List all memories:${N}"
-    echo "  curl http://localhost:8000/memories?user_id=me"
-    echo ""
-    echo -e "  ${C}# API docs (full Swagger UI):${N}"
-    echo "  http://localhost:8000/docs"
-    echo ""
-    echo -e "${W}  ── Quick Test ─────────────────────────────────────${N}"
-    echo "  Once configured, test with:"
-    echo -e "  ${C}curl http://localhost:8080/v1/models${N}   ← should list 'llama'"
-    echo -e "  ${C}curl http://localhost:8000/health${N}       ← MemU health check"
-    echo ""
-    PAUSE
-}
-
-# ================================================================
 #  MODEL MANAGER
 # ================================================================
 
-# Curated model catalogue — all verified to fit on Arc A770 16 GB
-# Format: "display_name|filename|url|vram_gb|description"
 _model_catalogue() {
     cat <<'CATALOGUE'
 Llama 3.1 8B Instruct Q4_K_M (default)|Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf|https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf|5.5|Best all-rounder. Fast, instruction-tuned, fits with room to spare.
@@ -759,14 +642,13 @@ CATALOGUE
 
 manage_models() {
     while true; do
-        _load_active_model  # refresh in case something changed
+        _load_active_model
         clear
         echo -e "${W}${C}  ╔══════════════════════════════════════════════╗"
         echo -e "  ║          🗂  MODEL MANAGER                   ║"
         echo -e "  ╚══════════════════════════════════════════════╝${N}"
         echo ""
 
-        # ── Installed models ─────────────────────────────────────
         echo -e "${W}  Installed models  (${MODEL_DIR})${N}"
         local installed=()
         while IFS= read -r -d '' f; do
@@ -943,7 +825,6 @@ _remove_model_menu() {
     if ask "Confirm deletion?" n; then
         rm -f "$target"
         OK "Deleted: $fname"
-        # If we just deleted the active model, clear config and auto-select next
         if [[ "$target" == "$MODEL_PATH" ]]; then
             rm -f "$MODEL_CONFIG"
             _load_active_model
@@ -992,272 +873,25 @@ validate_stack() {
     PAUSE
 }
 
-toggle_ui() {
-    if _ui_enabled; then
-        echo "off" > "$UI_CONFIG"
-        OK "AnythingLLM UI disabled — will not auto-start with stack."
-        INFO "To kill a running instance: pkill -f AnythingLLM"
-    else
-        echo "on" > "$UI_CONFIG"
-        OK "AnythingLLM UI enabled — will auto-start with stack."
-        if ask "Launch AnythingLLM now?"; then
-            if command -v anythingllm &>/dev/null; then
-                anythingllm &>/dev/null &
-                OK "AnythingLLM launched."
-            elif [[ -f "$APPS_DIR/AnythingLLM.AppImage" ]]; then
-                "$APPS_DIR/AnythingLLM.AppImage" &>/dev/null &
-                OK "AnythingLLM launched."
-            else
-                WARN "AnythingLLM binary not found — run Install (option 1)."
-            fi
-        fi
-    fi
-    PAUSE
-}
-
-
-# ================================================================
-#  16. LLM COMMAND SHELL
-#  Run llama-server or llama-cli with arbitrary flags — including
-#  the -hf <repo>:<quant> HuggingFace auto-download syntax.
-#
-#  Sub-options:
-#   a) llama-server -hf …   — replace running engine with a HF model
-#   b) llama-cli    -hf …   — interactive CLI session (server stays up)
-#   c) Custom command       — any llama binary + args you type
-# ================================================================
-llm_command_shell() {
-    local LLAMACPP_BIN_DIR
-    LLAMACPP_BIN_DIR="$(dirname "$LLAMACPP_BIN")"
-    local LLAMA_CLI="$LLAMACPP_BIN_DIR/llama-cli"
-    local LLAMA_SRV="$LLAMACPP_BIN_DIR/llama-server"
-
-    _source_envs
-
-    # ── Sanity: binaries must exist ───────────────────────────────
-    if [[ ! -f "$LLAMA_SRV" ]]; then
-        ERR "llama-server not found at $LLAMA_SRV"
-        INFO "Run Install (option 1) first."
-        PAUSE; return
-    fi
-    if [[ ! -f "$LLAMA_CLI" ]]; then
-        WARN "llama-cli not found at $LLAMA_CLI"
-        WARN "It may not have been built — only llama-server will be available."
-    fi
-
-    while true; do
-        clear
-        echo -e "${B}${W}"
-        echo "  ╔══════════════════════════════════════════════════════════════╗"
-        echo "  ║   🛠   LLM COMMAND SHELL                                      ║"
-        echo "  ║        Run llama binaries with custom flags / HF models       ║"
-        echo "  ╚══════════════════════════════════════════════════════════════╝"
-        echo -e "${N}"
-
-        # Show engine status inline so user knows if server is live
-        if pgrep -f "llama-server" &>/dev/null; then
-            echo -e "  Engine: ${G}● running${N}  (port $ENGINE_PORT)"
-        else
-            echo -e "  Engine: ${R}○ stopped${N}"
-        fi
-        echo ""
-        echo -e "${W}  a)  llama-server  — start with HuggingFace model or custom flags${N}"
-        echo "       Stops the running engine, launches with your spec, then"
-        echo "       offers to restore the original stack when you're done."
-        echo ""
-        echo -e "${W}  b)  llama-cli     — interactive CLI session${N}"
-        echo "       Runs in the foreground (Ctrl-C to exit). The background"
-        echo "       server stays up; be mindful of shared VRAM."
-        echo ""
-        echo -e "${W}  c)  Custom command — type any llama binary + arguments${N}"
-        echo "       Full path is inserted automatically; just supply the flags."
-        echo ""
-        echo "  0)  Back to main menu"
-        echo ""
-        echo -n "  Select [a/b/c/0]: "
-        read -r sub_opt
-
-        case "${sub_opt,,}" in
-
-            # ── A: llama-server with HF or custom flags ───────────
-            a)
-                clear
-                STEP "llama-server — HuggingFace / custom launch"
-                echo ""
-                echo -e "  ${W}Examples:${N}"
-                echo "    -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S"
-                echo "    -hf unsloth/Llama-3.2-3B-Instruct-GGUF:*Q4_K_M*"
-                echo "    --model $MODEL_DIR/my-model.gguf --ctx-size 4096"
-                echo ""
-                echo -e "  ${Y}Note: the running engine will be stopped first.${N}"
-                echo -e "  ${Y}Default flags added automatically:${N}"
-                echo "    --n-gpu-layers 99  --port $ENGINE_PORT  --host 0.0.0.0  --api-key local"
-                echo ""
-                echo -n "  Extra flags / HF spec: "
-                read -r srv_flags
-                [[ -z "$srv_flags" ]] && { WARN "No flags entered — aborting."; sleep 1; continue; }
-
-                # Stop existing server
-                echo ""
-                INFO "Stopping existing engine…"
-                pkill -f "llama-server" 2>/dev/null || true
-                sleep 1
-
-                # Build command (preserve HF quoting exactly as typed)
-                local -a SRV_CMD=(
-                    "$LLAMA_SRV"
-                    --n-gpu-layers 99
-                    --port          "$ENGINE_PORT"
-                    --host          0.0.0.0
-                    --api-key       local
-                )
-                # Append user flags via eval-safe word splitting
-                local -a usr_srv_args
-                IFS=' ' read -ra usr_srv_args <<< "$srv_flags"
-                SRV_CMD+=("${usr_srv_args[@]}")
-
-                echo ""
-                INFO "Launching: ${SRV_CMD[*]}"
-                echo -e "  ${Y}(Ctrl-C to stop — you will be offered to restore the stack)${N}"
-                echo ""
-
-                # Run in foreground so output streams live
-                ONEAPI_DEVICE_SELECTOR="level_zero:0" \
-                SYCL_DEVICE_FILTER="level_zero:gpu" \
-                "${SRV_CMD[@]}" || true
-
-                echo ""
-                INFO "llama-server exited."
-                if ask "Restart the normal stack now?"; then
-                    start_stack
-                else
-                    INFO "Stack left stopped. Use option 2 to restart when ready."
-                    PAUSE
-                fi
-                ;;
-
-            # ── B: llama-cli interactive session ─────────────────
-            b)
-                clear
-                STEP "llama-cli — interactive session"
-
-                if [[ ! -f "$LLAMA_CLI" ]]; then
-                    ERR "llama-cli not found. It may not be built in your llama.cpp version."
-                    PAUSE; continue
-                fi
-
-                echo ""
-                echo -e "  ${W}Examples:${N}"
-                echo "    -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S"
-                echo "    -hf unsloth/Llama-3.2-3B-Instruct-GGUF:*Q4_K_M*  -cnv"
-                echo "    --model $MODEL_DIR/my-model.gguf -p 'Hello!' -cnv"
-                echo ""
-
-                # Warn if server is also running (VRAM competition)
-                if pgrep -f "llama-server" &>/dev/null; then
-                    echo -e "  ${Y}⚠  llama-server is running and using VRAM.${N}"
-                    echo -e "  ${Y}   Loading a second model may exhaust VRAM on 16 GB.${N}"
-                    echo -e "  ${Y}   Tip: use the same gguf the server already loaded to avoid a second load.${N}"
-                    echo ""
-                    ask "Continue anyway?" n || continue
-                fi
-
-                echo -e "  ${Y}Default flags added automatically:${N}"
-                echo "    --n-gpu-layers 99"
-                echo ""
-                echo -n "  Extra flags / HF spec: "
-                read -r cli_flags
-                [[ -z "$cli_flags" ]] && { WARN "No flags entered — aborting."; sleep 1; continue; }
-
-                local -a CLI_CMD=("$LLAMA_CLI" --n-gpu-layers 99)
-                local -a usr_cli_args
-                IFS=' ' read -ra usr_cli_args <<< "$cli_flags"
-                CLI_CMD+=("${usr_cli_args[@]}")
-
-                echo ""
-                INFO "Launching: ${CLI_CMD[*]}"
-                echo -e "  ${Y}(Type /bye or Ctrl-C to exit the session)${N}"
-                echo ""
-
-                ONEAPI_DEVICE_SELECTOR="level_zero:0" \
-                SYCL_DEVICE_FILTER="level_zero:gpu" \
-                "${CLI_CMD[@]}" || true
-
-                echo ""
-                OK "llama-cli session ended."
-                PAUSE
-                ;;
-
-            # ── C: fully custom command ───────────────────────────
-            c)
-                clear
-                STEP "Custom llama command"
-                echo ""
-                echo -e "  ${W}Available binaries in $LLAMACPP_BIN_DIR:${N}"
-                ls "$LLAMACPP_BIN_DIR" 2>/dev/null | sed 's/^/    /' || WARN "Cannot list bin dir."
-                echo ""
-                echo -e "  ${W}SYCL envs are set automatically.${N}"
-                echo -e "  Enter the binary name + flags (binary path prefix inserted for you)."
-                echo -e "  Example:  ${C}llama-server -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S${N}"
-                echo ""
-                echo -n "  Command: "
-                read -r custom_cmd
-                [[ -z "$custom_cmd" ]] && { WARN "Empty input — aborting."; sleep 1; continue; }
-
-                # Extract binary name (first word) and prepend bin dir
-                local bin_name args_rest
-                bin_name=$(echo "$custom_cmd" | awk '{print $1}')
-                args_rest=$(echo "$custom_cmd" | cut -d' ' -f2-)
-                local full_bin="$LLAMACPP_BIN_DIR/$bin_name"
-
-                if [[ ! -f "$full_bin" ]]; then
-                    WARN "Binary not found: $full_bin"
-                    WARN "Trying to run as-is from PATH…"
-                    full_bin="$bin_name"
-                fi
-
-                echo ""
-                INFO "Running: $full_bin $args_rest"
-                echo -e "  ${Y}(Ctrl-C to interrupt)${N}"
-                echo ""
-
-                ONEAPI_DEVICE_SELECTOR="level_zero:0" \
-                SYCL_DEVICE_FILTER="level_zero:gpu" \
-                eval "$full_bin $args_rest" || true
-
-                echo ""
-                OK "Command exited."
-                PAUSE
-                ;;
-
-            0) return ;;
-            *) WARN "Invalid option."; sleep 1 ;;
-        esac
-    done
-}
-
 # ================================================================
 main() {
     while true; do
         show_menu
         read -r opt
         case "$opt" in
-            1)  install_stack       ;;
-            2)  start_stack         ;;
-            3)  stop_stack          ;;
-            4)  restart_stack       ;;
-            5)  check_status        ;;
-            6)  setup_systemd       ;;
-            7)  disable_systemd     ;;
-            8)  setup_anythingllm   ;;
-            9)  setup_web_search    ;;
-            10) view_logs           ;;
-            11) validate_stack      ;;
-            12) benchmark           ;;
-            13) uninstall           ;;
-            14) manage_models       ;;
-            15) toggle_ui           ;;
-            16) llm_command_shell  ;;
+            1)  install_stack    ;;
+            2)  start_stack      ;;
+            3)  stop_stack       ;;
+            4)  restart_stack    ;;
+            5)  check_status     ;;
+            6)  setup_systemd    ;;
+            7)  disable_systemd  ;;
+            8)  setup_web_search ;;
+            9)  view_logs        ;;
+            10) validate_stack   ;;
+            11) benchmark        ;;
+            12) uninstall        ;;
+            13) manage_models    ;;
             0)  echo "Bye!"; exit 0 ;;
             *)  WARN "Invalid option."; sleep 1 ;;
         esac
