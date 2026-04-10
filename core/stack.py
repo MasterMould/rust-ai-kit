@@ -9,15 +9,15 @@ from typing import Dict, List, Tuple
 import requests
 
 from core.config import (
-        HOME,
     INSTALL_DIR, LLAMACPP_BIN, STACK_LOG_DIR, PID_FILE,
     MEM_DIR, PROXY_DIR, SYSTEMD_DIR,
     ENGINE_PORT, SEARXNG_PORT, MEMORY_PORT, PROXY_PORT,
     ENGINE_URL, PROXY_URL, MEMORY_URL, SEARXNG_URL,
     LLAMA_SERVER_MODEL, LLAMA_API_KEY,
-    MODEL_CONFIG,
+    MODEL_CONFIG, HOME, ModelRunConfig,
 )
 from core.gpu import GPUDetector
+from core.models import ModelManager, ModelConfigManager
 
 class StackManager:
 
@@ -120,27 +120,36 @@ class StackManager:
     # ── Start engine (mirrors ENGINE_CMD array in start_stack) ───────────────
 
     @staticmethod
-    def start_engine(model_path: str, gpu_layers: int = 99) -> Tuple[bool, str]:
+    def start_engine(model_path: str,
+                     gpu_layers: int = 99,
+                     cfg: ModelRunConfig = None) -> Tuple[bool, str]:
+        """
+        Start llama-server using either a full ModelRunConfig (preferred)
+        or just a model path + gpu_layers (legacy/fallback).
+        """
         if not LLAMACPP_BIN.exists():
             return False, f"llama-server not found at {LLAMACPP_BIN} — run Install first"
         if not Path(model_path).exists():
             return False, f"Model not found: {model_path}"
 
-        STACK_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        log_file = open(STACK_LOG_DIR / "engine.log", "a")
+        # Build the argument list
+        if cfg is None:
+            cfg = ModelRunConfig(n_gpu_layers=gpu_layers)
+
+        server_args = ModelConfigManager.to_server_args(cfg, model_path)
         cmd = [
             str(LLAMACPP_BIN),
-            "--model",       model_path,
-            "--ctx-size",    "8192",
-            "--n-gpu-layers", str(gpu_layers),
-            "--port",        str(ENGINE_PORT),
-            "--host",        "0.0.0.0",
-            "--api-key",     LLAMA_API_KEY,
+            *server_args,
+            "--port",     str(ENGINE_PORT),
+            "--host",     "0.0.0.0",
+            "--api-key",  LLAMA_API_KEY,
         ]
+
+        STACK_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        log_file = open(STACK_LOG_DIR / "engine.log", "a")
         try:
             proc = subprocess.Popen(cmd, stdout=log_file, stderr=log_file,
                                     env=StackManager._sycl_env())
-            # Poll for API readiness — up to 90s, mirrors the shell script loop
             for _ in range(90):
                 time.sleep(1)
                 try:
@@ -250,11 +259,12 @@ class StackManager:
     # ── Restart — mirrors restart_stack() ────────────────────────────────────
 
     @staticmethod
-    def restart(model_path: str, gpu_layers: int = 99) -> Dict[str, Tuple[bool, str]]:
+    def restart(model_path: str, gpu_layers: int = 99,
+                cfg: ModelRunConfig = None) -> Dict[str, Tuple[bool, str]]:
         StackManager.stop_all()
         time.sleep(1)
         results: Dict[str, Tuple[bool, str]] = {}
-        ok, msg = StackManager.start_engine(model_path, gpu_layers)
+        ok, msg = StackManager.start_engine(model_path, gpu_layers, cfg)
         results["engine"] = (ok, msg)
         if ok:
             results["memory"] = StackManager.start_memory_server()

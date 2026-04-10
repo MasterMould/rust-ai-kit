@@ -1,180 +1,191 @@
-# ui/tab_rag.py — Local RAG Documents tab (admin-aware)
+# ui/tab_rag.py — Local RAG Documents: upload, manage, search, preview
 import streamlit as st
 
-from core.config       import (
-    APP_WORKSPACE, ADMIN_ALLOWED_EXTENSIONS, SecurityLevel
-)
+from core.config       import APP_WORKSPACE, RAG_DOCS_DIR
 from core.auth         import audit_log
 from core.security_rag import RAGManager
 
-
-def _is_admin() -> bool:
-    return st.session_state.get("role") == SecurityLevel.ADMIN.value
+_ACCEPTED = ["txt", "md", "pdf", "json", "yaml", "yml", "csv", "py", "rst"]
 
 
 def tab_rag():
     st.header("📚 Local RAG Documents")
 
-    is_admin = _is_admin()
-    if is_admin:
-        st.info(
-            "🔓 **Admin mode** — all file types accepted, "
-            "up to 100 MB per file, extended search options enabled."
-        )
+    docs = RAGManager.list_docs()
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Documents indexed", len(docs))
+    c2.metric("Total chunks", sum(d.get("chunk_count", 0) for d in docs))
+    c3.metric("Total size", _human(sum(d.get("size", 0) for d in docs)))
 
-    rtabs = st.tabs(["📤 Upload", "📋 Manage", "🔍 Search Test"])
+    st.divider()
+    rtabs = st.tabs(["📤 Upload", "📋 Manage & Preview", "🔍 Search"])
 
     # ── Upload ────────────────────────────────────────────────────────────────
     with rtabs[0]:
-        if is_admin:
-            st.caption(
-                "Admin: any file type accepted. "
-                "Jupyter notebooks, archives, code files, binaries all supported."
-            )
-            # Admin: unrestricted file types
-            files = st.file_uploader(
-                "Upload documents",
-                accept_multiple_files=True,
-                # No `type=` restriction for admin
-            )
-            raw_mode = st.checkbox(
-                "⚡ Raw mode",
-                value=False,
-                help="Skip content sanitisation — store file content exactly as-is. "
-                     "Useful for binary files, proprietary formats, or logs."
-            )
-        else:
-            st.caption("Accepted: PDF, Markdown, plain text, JSON, YAML.")
-            files = st.file_uploader(
-                "Upload documents",
-                accept_multiple_files=True,
-                type=["txt", "md", "pdf", "json", "yaml"],
-            )
-            raw_mode = False
+        st.caption(
+            f"Accepted: {', '.join(f'`.{e}`' for e in _ACCEPTED)}  \n"
+            "Uploaded documents are chunked (~400 chars) and indexed for keyword retrieval. "
+            "They are injected into chat prompts when **📄 Local RAG** is enabled in the sidebar."
+        )
+        files = st.file_uploader(
+            "Drop files here or click to browse",
+            accept_multiple_files=True,
+            type=_ACCEPTED,
+            label_visibility="collapsed",
+        )
 
-        if files and st.button("Process all", type="primary"):
-            bar = st.progress(0)
-            results = []
-            for i, f in enumerate(files):
-                tmp = APP_WORKSPACE / f.name
-                tmp.write_bytes(f.getbuffer())
-                ok, msg = RAGManager.process(tmp, f.name, is_admin=is_admin)
-                tmp.unlink(missing_ok=True)
-                results.append((f.name, ok, msg))
-                bar.progress((i + 1) / len(files))
+        if files:
+            already = {d["filename"] for d in docs}
+            new_files  = [f for f in files if f.name not in already]
+            dupe_files = [f for f in files if f.name in already]
 
-            for name, success, msg in results:
-                if success:
-                    st.success(f"✅ {name}: {msg}")
-                else:
-                    st.error(f"❌ {name}: {msg}")
-                audit_log(st.session_state.get("username", "?"), "RAG_UPLOAD", name, success)
+            if dupe_files:
+                with st.expander(f"⚠️ {len(dupe_files)} file(s) already indexed"):
+                    for f in dupe_files:
+                        st.caption(f"• `{f.name}` — already exists, will be replaced if you proceed")
 
-    # ── Manage ────────────────────────────────────────────────────────────────
-    with rtabs[1]:
-        docs = RAGManager.list_docs()
-        if not docs:
-            st.info("No documents yet.")
-        else:
-            st.success(f"{len(docs)} document(s) stored")
-
-            # Admin: bulk-select checkboxes + bulk delete
-            if is_admin:
-                st.caption("Admin: select documents and bulk-delete, or re-index all.")
-                selected = []
-                for doc in docs:
-                    col_chk, col_info, col_del = st.columns([0.5, 5, 1])
-                    with col_chk:
-                        if st.checkbox("", key=f"chk_{doc['filename']}"):
-                            selected.append(doc["filename"])
-                    with col_info:
-                        st.markdown(
-                            f"**{doc['filename']}**  "
-                            f"— {doc.get('size', 0):,} chars  "
-                            f"— {doc.get('uploaded', '')[:10]}"
-                            + (" *(admin upload)*" if doc.get("is_admin") else "")
-                        )
-                    with col_del:
-                        if st.button("🗑️", key=f"deldoc_{doc['filename']}"):
-                            RAGManager.delete(doc["filename"])
-                            audit_log(
-                                st.session_state.get("username", "?"),
-                                "RAG_DELETE", doc["filename"]
-                            )
-                            st.rerun()
-
-                col_bulk, col_reindex = st.columns(2)
-                with col_bulk:
-                    if selected and st.button(
-                        f"🗑️ Delete {len(selected)} selected", type="primary"
-                    ):
-                        ok_n, fail_n = RAGManager.bulk_delete(selected)
-                        st.success(f"Deleted {ok_n} document(s)")
-                        if fail_n:
-                            st.warning(f"{fail_n} failed")
-                        audit_log(
-                            st.session_state.get("username", "?"),
-                            "RAG_BULK_DELETE", f"{ok_n} files"
-                        )
-                        st.rerun()
-                with col_reindex:
-                    if st.button("🔄 Re-index all"):
-                        ok_n, fail_n = RAGManager.reindex_all(is_admin=True)
-                        st.success(f"Re-indexed {ok_n} document(s)")
-                        if fail_n:
-                            st.warning(f"{fail_n} failed")
-            else:
-                # Standard user — simple list with individual delete
-                for doc in docs:
-                    with st.expander(f"📄 {doc['filename']}"):
-                        c1, c2 = st.columns([4, 1])
-                        c1.markdown(
-                            f"Uploaded: {doc.get('uploaded', '?')}  \n"
-                            f"Size: {doc.get('size', 0):,} chars"
-                        )
-                        with c2:
-                            if st.button("🗑️ Delete", key=f"deldoc_{doc['filename']}"):
-                                RAGManager.delete(doc["filename"])
-                                audit_log(
-                                    st.session_state.get("username", "?"),
-                                    "RAG_DELETE", doc["filename"]
-                                )
-                                st.rerun()
-
-    # ── Search Test ───────────────────────────────────────────────────────────
-    with rtabs[2]:
-        q = st.text_input("Test query:")
-
-        col_res, col_full = st.columns([2, 1])
-        with col_res:
-            max_r = st.slider(
-                "Max results", 1, 50 if is_admin else 10,
-                5 if is_admin else 3,
-                help="Admin can retrieve up to 50 results."
-            )
-        with col_full:
-            show_full = False
-            if is_admin:
-                show_full = st.checkbox(
-                    "Show full content",
-                    value=False,
-                    help="Admin: display the complete document text, not just the matched snippet."
+            col_proc, col_skip, _ = st.columns([1, 1, 4])
+            with col_proc:
+                do_all = st.button(
+                    f"✅ Process {len(files)} file(s)",
+                    type="primary",
+                    disabled=not files,
+                )
+            with col_skip:
+                do_new = st.button(
+                    f"➕ New only ({len(new_files)})",
+                    disabled=not new_files,
                 )
 
-        if st.button("🔍 Search") and q:
-            results = RAGManager.search(
-                q, max_results=max_r, full_content=show_full
+            to_process = files if do_all else (new_files if do_new else [])
+            if to_process:
+                bar = st.progress(0, text="Processing…")
+                for i, f in enumerate(to_process):
+                    tmp = APP_WORKSPACE / f.name
+                    tmp.write_bytes(f.getbuffer())
+                    ok, msg = RAGManager.process(tmp, f.name)
+                    tmp.unlink(missing_ok=True)
+                    if ok:
+                        st.success(f"✅ `{f.name}` — {msg}")
+                    else:
+                        st.error(f"❌ `{f.name}` — {msg}")
+                    audit_log(st.session_state.username, "RAG_UPLOAD", f.name, ok)
+                    bar.progress((i + 1) / len(to_process),
+                                 text=f"Processed {i+1}/{len(to_process)}…")
+                bar.progress(1.0, text="Done!")
+                st.rerun()
+
+    # ── Manage & Preview ──────────────────────────────────────────────────────
+    with rtabs[1]:
+        if not docs:
+            st.info("No documents indexed yet. Upload some in the **Upload** tab.")
+        else:
+            # Sort control
+            sort_by = st.selectbox(
+                "Sort by", ["Newest first", "Oldest first", "Name A→Z", "Largest first"],
+                label_visibility="collapsed",
             )
-            if results:
-                st.success(f"{len(results)} result(s)")
-                for r in results:
-                    fname = r["filename"]
-                    score = r["score"]
-                    st.markdown(f"**{fname}** — score {score}")
-                    st.info(r["context"])
-                    if show_full and r.get("full_content"):
-                        with st.expander("Full document content"):
-                            st.text(r["full_content"][:20000])
-                    st.divider()
+            sorted_docs = _sort_docs(docs, sort_by)
+
+            for doc in sorted_docs:
+                fname  = doc["filename"]
+                size   = _human(doc.get("size", 0))
+                chunks = doc.get("chunk_count", "?")
+                ts     = doc.get("uploaded", "")[:16].replace("T", " ")
+                sfx    = doc.get("suffix", "")
+
+                with st.expander(f"{_file_icon(sfx)} **{fname}**  ·  {size}  ·  {chunks} chunks"):
+                    col_meta, col_actions = st.columns([3, 1])
+                    with col_meta:
+                        st.caption(f"Uploaded: {ts}  ·  Suffix: `{sfx}`")
+
+                    with col_actions:
+                        if st.button("🗑️ Delete", key=f"del_{fname}"):
+                            RAGManager.delete(fname)
+                            audit_log(st.session_state.username, "RAG_DELETE", fname)
+                            st.rerun()
+                        st.download_button(
+                            "⬇️ Download",
+                            data=RAGManager.get_content(fname).encode(),
+                            file_name=fname,
+                            mime="text/plain",
+                            key=f"dl_{fname}",
+                        )
+
+                    # Full text preview
+                    content = RAGManager.get_content(fname)
+                    if content:
+                        preview_lines = st.slider(
+                            "Preview lines", 5, 100, 20,
+                            key=f"prev_{fname}",
+                        )
+                        preview = "\n".join(content.splitlines()[:preview_lines])
+                        st.text_area(
+                            "", value=preview, height=200,
+                            label_visibility="collapsed",
+                            key=f"ta_{fname}",
+                        )
+                        if len(content.splitlines()) > preview_lines:
+                            st.caption(
+                                f"Showing first {preview_lines} of "
+                                f"{len(content.splitlines())} lines."
+                            )
+
+    # ── Search ────────────────────────────────────────────────────────────────
+    with rtabs[2]:
+        st.caption(
+            "TF-IDF ranked search across all indexed documents. "
+            "Results show the most relevant chunk from each document, "
+            "with relevance score. This is the same search used during chat."
+        )
+        col_q, col_n = st.columns([4, 1])
+        with col_q:
+            q = st.text_input(
+                "Search query",
+                placeholder="e.g. quarterly revenue, installation steps, API key…",
+                label_visibility="collapsed",
+            )
+        with col_n:
+            max_r = st.number_input("Max results", 1, 20, 5, label_visibility="collapsed")
+
+        if st.button("🔍 Search", type="primary", disabled=not q) and q:
+            with st.spinner("Searching…"):
+                results = RAGManager.search(q, max_results=int(max_r))
+
+            if not results:
+                st.warning("No matching chunks found. Try broader terms or check your documents.")
             else:
-                st.warning("No matches found.")
+                st.success(f"Found {len(results)} result(s) for `{q}`")
+                for i, r in enumerate(results):
+                    score_pct = min(int(r["score"] * 1000), 100)
+                    with st.expander(
+                        f"#{i+1}  📄 **{r['filename']}**  "
+                        f"·  chunk {r['chunk_idx']+1}/{r['total_chunks']}  "
+                        f"·  relevance {score_pct}%"
+                    ):
+                        st.markdown(r["context"])
+                        st.caption(f"Raw TF-IDF score: `{r['score']}`")
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _human(n: int) -> str:
+    if n < 1024:      return f"{n} B"
+    if n < 1_048_576: return f"{n/1024:.1f} KB"
+    return f"{n/1_048_576:.1f} MB"
+
+
+def _file_icon(suffix: str) -> str:
+    return {
+        ".pdf": "📕", ".md": "📝", ".txt": "📄", ".py": "🐍",
+        ".json": "🔧", ".yaml": "🔧", ".yml": "🔧",
+        ".csv": "📊", ".rst": "📄",
+    }.get(suffix.lower(), "📄")
+
+
+def _sort_docs(docs, by: str) -> list:
+    if by == "Newest first":   return docs  # already sorted newest first
+    if by == "Oldest first":   return list(reversed(docs))
+    if by == "Name A→Z":       return sorted(docs, key=lambda d: d["filename"].lower())
+    if by == "Largest first":  return sorted(docs, key=lambda d: d.get("size", 0), reverse=True)
+    return docs

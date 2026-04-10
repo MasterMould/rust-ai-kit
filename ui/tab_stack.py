@@ -8,12 +8,12 @@ import streamlit as st
 from core.config import (
     BackendMode, ENGINE_PORT, PROXY_PORT, MEMORY_PORT, SEARXNG_PORT,
     PROXY_URL, STACK_LOG_DIR, MODEL_CONFIG,
-    LLAMA_API_KEY, LLAMA_SERVER_MODEL,
+    LLAMA_API_KEY, LLAMA_SERVER_MODEL, PROJECT_ROOT,
 )
 from core.auth   import audit_log
 from core.gpu    import GPUDetector
 from core.stack  import StackManager
-from core.models import ModelManager
+from core.models import ModelManager, ModelConfigManager
 
 def _svc(label: str, ok: bool, url: str, note: str = "",
          start_fn=None, log_name: str = ""):
@@ -79,7 +79,9 @@ def tab_stack():
 
     _svc("llama-server (SYCL)", status["engine"], f":{ENGINE_PORT}",
          "Direct inference — no web search",
-         start_fn=(lambda: StackManager.start_engine(active, gpu_layers)) if active else None,
+         start_fn=(lambda: StackManager.start_engine(
+             active, gpu_layers, ModelConfigManager.load(active)
+         )) if active else None,
          log_name="engine")
     _svc("search proxy", status["proxy"], f":{PROXY_PORT}",
          "Point AnythingLLM here — adds SearXNG transparently",
@@ -134,19 +136,80 @@ def tab_stack():
 
     # Stack controls (options 2 / 3 / 4)
     st.subheader("⚙️ Stack controls")
-    st.caption(
-        "Replicates options **2 (Start) / 3 (Stop) / 4 (Restart)** from "
-        "`ai_stack_manager.sh` — same SYCL env, same process patterns."
-    )
 
+    # ── Window launch row ─────────────────────────────────────────────────────
+    st.markdown("**Start server in its own terminal window** (recommended — live output visible)")
+    wc1, wc2, wc3 = st.columns([2, 2, 4])
+    with wc1:
+        if st.button("🖥️ Open server window", type="primary",
+                     help="Launches llama-server in a dedicated terminal. "
+                          "Close the window or press Ctrl-C to stop it."):
+            script = PROJECT_ROOT / "run-server-window.sh"
+            if not script.exists():
+                st.error(f"`run-server-window.sh` not found at `{PROJECT_ROOT}`. "
+                         "Pull the latest code and re-run `make setup`.")
+            elif not active:
+                st.error("No active model — use the Models tab to download and activate one.")
+            else:
+                try:
+                    subprocess.Popen(
+                        ["bash", str(script)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+                    st.success(
+                        "Terminal window opening… watch it for startup progress. "
+                        "The engine will appear in the status panel above once it's ready."
+                    )
+                    audit_log(st.session_state.username, "SERVER_WINDOW_OPEN",
+                              str(script), True)
+                except Exception as e:
+                    st.error(f"Could not launch terminal: {e}")
+
+    with wc2:
+        if st.button("🛑 Stop server",
+                     help="Kills llama-server, search proxy, and memory server."):
+            script = PROJECT_ROOT / "stop-server.sh"
+            if not script.exists():
+                # Fallback: use Python StackManager
+                msgs = StackManager.stop_all()
+                for m in msgs:
+                    st.success(m)
+            else:
+                result = subprocess.run(
+                    ["bash", str(script)],
+                    capture_output=True, text=True, timeout=15,
+                )
+                output = (result.stdout + result.stderr).strip()
+                if output:
+                    st.code(output, language="bash")
+                st.success("Stop command sent.")
+            audit_log(st.session_state.username, "SERVER_STOP", "stop-server.sh")
+
+    with wc3:
+        st.caption(
+            "The server window shows live llama.cpp output — tokens/s, context usage, errors.  \n"
+            "It uses your saved **Configure** settings (GPU layers, context size, flash-attn, etc.)."
+        )
+
+    st.divider()
+
+    # ── Background controls ───────────────────────────────────────────────────
+    st.markdown("**Background controls** (silent — no terminal window)")
+    st.caption(
+        "Use these if you prefer the server hidden. "
+        "Same as `ai_stack_manager.sh` options 2 / 3 / 4."
+    )
     c1, c2, c3 = st.columns(3)
     with c1:
-        if st.button("▶️ Start engine"):
+        if st.button("▶️ Start (background)"):
             if not active:
                 st.error("No model set")
             else:
                 with st.spinner(f"Starting… GPU layers={gpu_layers} (up to 90s)"):
-                    ok, msg = StackManager.start_engine(active, gpu_layers)
+                    cfg = ModelConfigManager.load(active)
+                    ok, msg = StackManager.start_engine(active, gpu_layers, cfg)
                 st.success(msg) if ok else st.error(msg)
                 audit_log(st.session_state.username, "START_ENGINE", msg, ok)
 
@@ -163,7 +226,8 @@ def tab_stack():
                 st.error("No model set")
             else:
                 with st.spinner("Restarting…"):
-                    results = StackManager.restart(active, gpu_layers)
+                    cfg     = ModelConfigManager.load(active)
+                    results = StackManager.restart(active, gpu_layers, cfg)
                 for svc, (ok, msg) in results.items():
                     (st.success if ok else st.error)(f"{'✅' if ok else '❌'} {svc}: {msg}")
                 audit_log(st.session_state.username, "RESTART", str(results))
