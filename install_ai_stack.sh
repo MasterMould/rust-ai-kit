@@ -60,7 +60,7 @@ preflight() {
     echo -e "${W}  GPU detection:${N}"
 # Method 1    
         if clinfo | grep -i "Device Name" | grep -iq "Arc"; then
-    OK "  Intel Arc GPU visible via OpenCL"
+    OK " Intel Arc GPU visible via OpenCL"
     else
         WARN "  Intel Arc GPU NOT fully visible via OpenCL"
     fi
@@ -68,7 +68,7 @@ preflight() {
 # Method 2
     
     if lspci | grep -qi "Arc A770"; then
-        OK "Intel Arc A770 detected."
+    OK " Intel Arc A770 detected via lspci"
     else
         WARN "Could not confirm Arc A770 via lspci. Proceeding anyway — verify your GPU."
         lspci | grep -i "VGA\|Display\|3D" || true
