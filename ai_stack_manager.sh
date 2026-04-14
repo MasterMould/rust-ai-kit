@@ -39,8 +39,12 @@ mkdir -p "$MODEL_DIR"
 _load_active_model
 
 # ── Network ───────────────────────────────────────────────────────
+#Set network acessability: 0.0.0.0 = Yes - 127.0.0.1 = No 
+visible2network=0.0.0.0
 ENGINE_PORT=8080
 SEARXNG_PORT=8081
+context_size=8192
+flash_attention=0
 
 # ── Intel Arc A770 SYCL env ───────────────────────────────────────
 _source_envs() {
@@ -247,10 +251,11 @@ start_stack() {
     local -a ENGINE_CMD=(
         "$LLAMACPP_BIN"
         --model         "$MODEL_PATH"
-        --ctx-size      8192
+        --ctx-size      "$context_size"
+        --flash-attn    "$flash_attention"
         --n-gpu-layers  "$GPU_LAYERS"
         --port          "$ENGINE_PORT"
-        --host          0.0.0.0
+        --host          "$visible2network"
         --api-key       local
     )
 
