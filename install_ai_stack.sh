@@ -5,7 +5,7 @@
 #  Components: WasmEdge+GGML-SYCL · LlamaEdge · MemU · AnythingLLM
 # ================================================================
 
-set -euo pipefail
+#set -euo pipefail
 # Optional debug + features
 [[ "${DEBUG:-0}" == "1" ]] && set -x
 USE_BITNET="${USE_BITNET:-}"
@@ -37,14 +37,60 @@ MODEL_NAME="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 MODEL_URL="https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 MODEL_PATH="$MODEL_DIR/$MODEL_NAME"
 
-# ── Helper ───────────────────────────────────────────────────────
+# ================================================================
+#  Helpers
+# ================================================================
 ask() {
     local yn="[Y/n]"; [[ "${2:-y}" == "n" ]] && yn="[y/N]"
     read -rp "$(echo -e "${Y}  ❓  $1 $yn: ${N}")" r
     r="${r:-${2:-y}}"
     [[ "${r,,}" == "y" ]]
 }
-PAUSE() { read -rp "$(echo -e "${Y}  Press Enter to continue…${N}")"; }
+PAUSE() {
+     read -rp "$(echo -e "${Y}  Press Enter to continue…${N}")"; 
+}
+
+#  CMake generator guard (surgical, safe, verbose)
+ensure_cmake_generator() {
+    local build_dir="$1"
+    local desired_gen="$2"
+
+    local cache_file="$build_dir/CMakeCache.txt"
+
+    if [[ ! -f "$cache_file" ]]; then
+        INFO "No existing CMake cache — fresh configure."
+        return 0
+    fi
+
+    local current_gen
+    current_gen=$(grep "CMAKE_GENERATOR:INTERNAL=" "$cache_file" \
+        | cut -d= -f2 || true)
+
+    if [[ -z "$current_gen" ]]; then
+        WARN "Could not detect existing generator — cleaning to be safe."
+        rm -rf "$build_dir"
+        return 0
+    fi
+
+    if [[ "$current_gen" == "$desired_gen" ]]; then
+        OK "CMake generator matches ($desired_gen) — reusing build directory."
+        return 0
+    fi
+
+    echo ""
+    WARN "CMake generator mismatch detected:"
+    echo -e "  Existing: ${Y}$current_gen${N}"
+    echo -e "  Required: ${Y}$desired_gen${N}"
+    echo ""
+
+    if ask "Clean build directory to fix this automatically?" "y"; then
+        INFO "Cleaning build directory (safe reset)…"
+        rm -rf "$build_dir"
+        OK "Build directory reset."
+    else
+        ERR "Cannot continue with mismatched generator."
+    fi
+}
 
 # ── User config (set during install) ─────────────────────────────
 ENABLE_DEBUG=0
@@ -60,7 +106,7 @@ preflight() {
     echo -e "${W}  GPU detection:${N}"
 # Method 1    
         if clinfo | grep -i "Device Name" | grep -iq "Arc"; then
-    OK " Intel Arc GPU visible via OpenCL"
+    OK "  Intel Arc GPU visible via OpenCL"
     else
         WARN "  Intel Arc GPU NOT fully visible via OpenCL"
     fi
@@ -68,7 +114,7 @@ preflight() {
 # Method 2
     
     if lspci | grep -qi "Arc A770"; then
-    OK " Intel Arc A770 detected via lspci"
+        OK "Intel Arc A770 detected."
     else
         WARN "Could not confirm Arc A770 via lspci. Proceeding anyway — verify your GPU."
         lspci | grep -i "VGA\|Display\|3D" || true
@@ -327,16 +373,21 @@ update_llamacpp() {
     local BITNET_FLAG=""
     [[ "${ENABLE_BITNET:-0}" == "1" ]] && BITNET_FLAG="-DGGML_USE_BITNET=ON"
 
-    INFO "Reconfiguring build…"
-    cmake -B "$LLAMACPP_DIR/build" \
-        -S "$LLAMACPP_DIR" \
-        -G Ninja \
-        -DGGML_SYCL=ON \
-        $BITNET_FLAG \
-        -DCMAKE_C_COMPILER="$ICX_BIN" \
-        -DCMAKE_CXX_COMPILER="$ICPX_BIN" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DGGML_SYCL_F16=ON
+# ── Ensure generator consistency ───────────────────────────────
+ensure_cmake_generator "$LLAMACPP_DIR/build" "Ninja"
+
+# ── Configure ────────────────────────────────────────────────
+INFO "Configuring cmake with SYCL backend${BITNET_FLAG:+ + BitNet}…"
+
+cmake -B "$LLAMACPP_DIR/build" \
+    -S "$LLAMACPP_DIR" \
+    -G Ninja \
+    -DGGML_SYCL=ON \
+    $BITNET_FLAG \
+    -DCMAKE_C_COMPILER="$ICX_BIN" \
+    -DCMAKE_CXX_COMPILER="$ICPX_BIN" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_SYCL_F16=ON
 
     INFO "Rebuilding…"
     cmake --build "$LLAMACPP_DIR/build" -j"$(nproc)"
@@ -358,6 +409,7 @@ install_llamacpp_sycl() {
   #  fi
 
     # ── Locate Intel icx/icpx compilers ──────────────────────────
+    echo "--- Locate Intel icx/icpx compilers ---"
     local ICX_BIN ICPX_BIN ONEAPI_BIN
     ICX_BIN=$(command -v icx 2>/dev/null) \
         || ICX_BIN=$(find /opt/intel/oneapi -name icx  -type f 2>/dev/null | sort -r | head -1) \
@@ -377,23 +429,57 @@ install_llamacpp_sycl() {
     export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
 
     # ── Source environment ───────────────────────────────────────
-    if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
-        source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
+echo "--- Source environment ---"
+
+# Prefer official oneAPI environment setup
+if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
+    INFO "Sourcing Intel oneAPI environment…"
+    # shellcheck disable=SC1091
+    source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
+
+    # Sanity check: ensure SYCL is actually usable
+    if command -v icx &>/dev/null && command -v icpx &>/dev/null; then
+        OK "oneAPI environment loaded (icx/icpx available)"
     else
-        local SYCL_LIB
-        SYCL_LIB=$(find /opt/intel/oneapi -name "libsycl.so*" -type f 2>/dev/null \
-                   | head -1 | xargs dirname 2>/dev/null) || true
-        [[ -n "$SYCL_LIB" ]] && export LD_LIBRARY_PATH="$SYCL_LIB:${LD_LIBRARY_PATH:-}"
+        WARN "setvars.sh loaded, but compilers not found in PATH"
     fi
 
-    OK "Using Intel compilers: $ICX_BIN / $ICPX_BIN"
+else
+    WARN "setvars.sh not found — falling back to manual SYCL detection"
+
+    # Try to locate libsycl dynamically
+    local SYCL_LIB
+    SYCL_LIB=$(find /opt/intel/oneapi -type f -name "libsycl.so*" 2>/dev/null \
+               | sort -r | head -1 | xargs dirname 2>/dev/null) || true
+
+    if [[ -n "$SYCL_LIB" ]]; then
+        export LD_LIBRARY_PATH="$SYCL_LIB:${LD_LIBRARY_PATH:-}"
+        OK "Found SYCL runtime → $SYCL_LIB"
+    else
+        WARN "Could not locate libsycl.so — SYCL backend may fail"
+    fi
+
+    # Also try to locate compiler bin dir
+    local ONEAPI_BIN
+    ONEAPI_BIN=$(find /opt/intel/oneapi -type f -name icx 2>/dev/null \
+                 | sort -r | head -1 | xargs dirname 2>/dev/null) || true
+
+    if [[ -n "$ONEAPI_BIN" ]]; then
+        export PATH="$ONEAPI_BIN:$PATH"
+        OK "Added oneAPI compiler path → $ONEAPI_BIN"
+    else
+        WARN "icx compiler not found in fallback search"
+    fi
+fi
 
     # ── Extra build deps ─────────────────────────────────────────
+    echo "--- Extra build deps ---"
     INFO "Installing build dependencies…"
     sudo apt-get install -y --no-install-recommends \
         ninja-build libopenblas-dev
 
     # ── Clone or update ──────────────────────────────────────────
+    echo "--- Clone or update ---"
     if [[ -d "$LLAMACPP_DIR/.git" ]]; then
         INFO "Updating llama.cpp repo…"
         git -C "$LLAMACPP_DIR" pull --ff-only
@@ -403,6 +489,7 @@ install_llamacpp_sycl() {
     fi
 
     # ── BitNet toggle (interactive config) ───────────────────────
+    echo "--- BitNet toggle ---"
     local BITNET_FLAG=""
     if [[ "${ENABLE_BITNET:-0}" == "1" ]]; then
         BITNET_FLAG="-DGGML_USE_BITNET=ON"
@@ -412,6 +499,7 @@ install_llamacpp_sycl() {
     fi
 
     # ── Configure ────────────────────────────────────────────────
+    echo "--- Configure ---"
     INFO "Configuring cmake with SYCL backend${BITNET_FLAG:+ + BitNet}…"
     cmake -B "$LLAMACPP_DIR/build" \
         -S "$LLAMACPP_DIR" \
@@ -424,12 +512,14 @@ install_llamacpp_sycl() {
         -DGGML_SYCL_F16=ON
 
     # ── Build ────────────────────────────────────────────────────
+    echo "--- Build ---"
     INFO "Building llama.cpp (using $(nproc) cores — takes a few minutes)…"
     cmake --build "$LLAMACPP_DIR/build" --config Release -j"$(nproc)"
 
     [[ -f "$LLAMACPP_BIN" ]] \
         && OK "llama-server built → $LLAMACPP_BIN" \
         || ERR "Build completed but llama-server binary not found — check build output above."
+    PAUSE
 }
 
 # ================================================================
