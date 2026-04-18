@@ -6,7 +6,7 @@ install_system_deps() {
     sudo apt-get install -y \
         git cmake build-essential ninja-build \
         libopenblas-dev libssl-dev pkg-config \
-        curl wget clinfo
+        curl python3.12-venv wget clinfo
 }
 
 install_llamacpp() {
