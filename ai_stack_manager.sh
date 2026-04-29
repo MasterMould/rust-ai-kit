@@ -39,12 +39,43 @@ mkdir -p "$MODEL_DIR"
 _load_active_model
 
 # ── Network ───────────────────────────────────────────────────────
-#Set network acessability: 0.0.0.0 = Yes - 127.0.0.1 = No 
+#Set network acessability: 0.0.0.0 = Yes - 127.0.0.1 = No
 visible2network=0.0.0.0
 ENGINE_PORT=8080
 SEARXNG_PORT=8081
 context_size=8192
 flash_attention=0
+gpu_layers=99
+ENGINE_CONFIG="$INSTALL_DIR/.engine_config"
+
+# ── Persist / restore server settings ────────────────────────────
+_load_engine_config() {
+    [[ -f "$ENGINE_CONFIG" ]] || return 0
+    local key v
+    while IFS='=' read -r key v; do
+        [[ "$key" =~ ^# || -z "$key" ]] && continue
+        case "$key" in
+            ENGINE_PORT)     ENGINE_PORT="$v"     ;;
+            context_size)    context_size="$v"    ;;
+            visible2network) visible2network="$v" ;;
+            gpu_layers)      gpu_layers="$v"      ;;
+            flash_attention) flash_attention="$v" ;;
+        esac
+    done < "$ENGINE_CONFIG"
+}
+
+_save_engine_config() {
+    mkdir -p "$INSTALL_DIR"
+    printf 'ENGINE_PORT=%s
+context_size=%s
+visible2network=%s
+gpu_layers=%s
+flash_attention=%s
+'         "$ENGINE_PORT" "$context_size" "$visible2network"         "$gpu_layers" "$flash_attention" > "$ENGINE_CONFIG"
+}
+
+# Load persisted settings at startup (no-op if file absent)
+_load_engine_config
 
 # ── Intel Arc A770 SYCL env ───────────────────────────────────────
 _source_envs() {
@@ -121,6 +152,11 @@ show_menu() {
     echo -e "${W}  Models${N}"
     echo "  13) Model Manager  (download · switch · delete)"
     echo ""
+    echo -e "${W}  Configuration & Tools${N}"
+    echo "  14) Server Settings  (ctx · port · host · gpu layers)"
+    echo "  15) Component Installer  (llama.cpp · mem0 · SearXNG · proxy)"
+    echo "  16) LLM Command Shell    (llama-server / llama-cli · HuggingFace)"
+    echo ""
     echo "  0)  Exit"
     echo -e "${B}  ──────────────────────────────────────────────${N}"
     echo -n "  Select: "
@@ -160,6 +196,7 @@ _print_quick_status() {
     else
         echo -e "  Model:  ${R}none — use option 13${N}"
     fi
+    echo -e "  Config: ctx ${W}${context_size}${N}  port ${W}${ENGINE_PORT}${N}  host ${W}${visible2network}${N}  gpu-layers ${W}${gpu_layers}${N}"
     echo ""
 }
 
@@ -239,12 +276,13 @@ start_stack() {
         local GPU_LAYERS=0
     else
         OK "Intel Arc A770 visible — using GPU."
-        local GPU_LAYERS=99
+        local GPU_LAYERS="$gpu_layers"
     fi
 
-    INFO "Model:    $(basename "$MODEL_PATH")"
-    INFO "Context:  8192 tokens"
-    INFO "GPU layers: $GPU_LAYERS"
+    INFO "Model:     $(basename "$MODEL_PATH")"
+    INFO "Context:   $context_size tokens"
+    INFO "GPU layers: $GPU_LAYERS  (config: $gpu_layers)"
+    INFO "Host:      $visible2network:$ENGINE_PORT"
 
     # ── Launch engine ─────────────────────────────────────────────
     mkdir -p "$LOG_DIR"
@@ -252,12 +290,13 @@ start_stack() {
         "$LLAMACPP_BIN"
         --model         "$MODEL_PATH"
         --ctx-size      "$context_size"
-        --flash-attn    "$flash_attention"
         --n-gpu-layers  "$GPU_LAYERS"
         --port          "$ENGINE_PORT"
         --host          "$visible2network"
         --api-key       local
     )
+    # Only pass --flash-attn if enabled (avoids errors on older builds)
+    [[ "$flash_attention" == "1" ]] && ENGINE_CMD+=(--flash-attn)
 
     ONEAPI_DEVICE_SELECTOR="level_zero:0" \
     SYCL_DEVICE_FILTER="level_zero:gpu" \
@@ -879,6 +918,311 @@ validate_stack() {
 }
 
 # ================================================================
+#  14. SERVER SETTINGS
+#  Edit ctx-size, port, host binding, gpu-layers, flash-attn.
+#  Settings persist in $INSTALL_DIR/.engine_config.
+# ================================================================
+server_settings() {
+    _load_engine_config
+    while true; do
+        clear
+        echo -e "${B}${W}"
+        echo "  ╔══════════════════════════════════════════════════════════════╗"
+        echo "  ║   ⚙   SERVER SETTINGS                                         ║"
+        echo "  ║       Saved to ~/.engine_config — applied on next start       ║"
+        echo "  ╚══════════════════════════════════════════════════════════════╝"
+        echo -e "${N}"
+        local fa_label; [[ "$flash_attention" == "1" ]] && fa_label="${G}on${N}" || fa_label="${Y}off${N}"
+        echo -e "  ${W}1)${N}  Context size   : ${C}${context_size}${N} tokens"
+        echo -e "  ${W}2)${N}  Server port    : ${C}${ENGINE_PORT}${N}"
+        echo -e "  ${W}3)${N}  Host binding   : ${C}${visible2network}${N}"
+        echo -e "  ${W}4)${N}  GPU layers     : ${C}${gpu_layers}${N}  (99 = all on GPU, 0 = CPU)"
+        echo -e "  ${W}5)${N}  Flash attention: $fa_label"
+        echo ""
+        echo "  s)  Save & return"
+        echo "  0)  Cancel"
+        echo ""
+        echo -n "  Select: "
+        read -r ss
+
+        case "${ss,,}" in
+            1)
+                echo ""
+                echo -e "  Common: 2048  4096  8192  16384  32768"
+                echo -e "  ${Y}Arc A770 16 GB: fits ~32k at Q4_K_M for 8B models${N}"
+                echo -n "  Context size [$context_size]: "
+                read -r val
+                if [[ -z "$val" ]]; then
+                    INFO "Unchanged."
+                elif [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 512 && val <= 131072 )); then
+                    context_size=$val; OK "Set to $context_size"
+                else
+                    WARN "Must be 512–131072."
+                fi; sleep 1 ;;
+            2)
+                echo ""
+                echo -e "  ${Y}Changing port also affects systemd service and search proxy.${N}"
+                echo -n "  Port [$ENGINE_PORT]: "
+                read -r val
+                if [[ -z "$val" ]]; then
+                    INFO "Unchanged."
+                elif [[ "$val" =~ ^[0-9]+$ ]] && (( val >= 1024 && val <= 65535 )); then
+                    ENGINE_PORT=$val; OK "Set to $ENGINE_PORT"
+                else
+                    WARN "Must be 1024–65535."
+                fi; sleep 1 ;;
+            3)
+                echo ""
+                echo "  1) 0.0.0.0    — all interfaces  (LAN / remote accessible)"
+                echo "  2) 127.0.0.1  — localhost only  (single machine, more secure)"
+                echo -n "  Choice [1/2]: "
+                read -r hval
+                case "$hval" in
+                    1) visible2network="0.0.0.0";   OK "Set to 0.0.0.0" ;;
+                    2) visible2network="127.0.0.1"; OK "Set to 127.0.0.1" ;;
+                    *) WARN "No change." ;;
+                esac; sleep 1 ;;
+            4)
+                echo ""
+                echo -n "  GPU layers [$gpu_layers]: "
+                read -r val
+                if [[ -z "$val" ]]; then
+                    INFO "Unchanged."
+                elif [[ "$val" =~ ^[0-9]+$ ]]; then
+                    gpu_layers=$val; OK "Set to $gpu_layers"
+                else
+                    WARN "Must be a number."
+                fi; sleep 1 ;;
+            5)
+                if [[ "$flash_attention" == "1" ]]; then
+                    flash_attention=0; OK "Flash attention disabled."
+                else
+                    flash_attention=1; OK "Flash attention enabled."
+                fi; sleep 1 ;;
+            s)
+                _save_engine_config
+                OK "Saved → $ENGINE_CONFIG"
+                INFO "Restart the stack (option 4) to apply."
+                PAUSE; return ;;
+            0) return ;;
+            *) WARN "Invalid option."; sleep 1 ;;
+        esac
+    done
+}
+
+# ================================================================
+#  15. COMPONENT INSTALLER
+#  Install individual components without the full installer.
+# ================================================================
+component_installer() {
+    local INSTALLER
+    INSTALLER="$(dirname "$(realpath "$0")")/install_ai_stack.sh"
+
+    if [[ ! -f "$INSTALLER" ]]; then
+        ERR "install_ai_stack.sh not found next to this script."
+        PAUSE; return
+    fi
+
+    while true; do
+        clear
+        echo -e "${B}${W}"
+        echo "  ╔══════════════════════════════════════════════════════════════╗"
+        echo "  ║   📦  COMPONENT INSTALLER                                     ║"
+        echo "  ╚══════════════════════════════════════════════════════════════╝"
+        echo -e "${N}"
+
+        local llama_s mem_s proxy_s searxng_s
+        [[ -f "$LLAMACPP_BIN" ]] \
+            && llama_s="${G}✓ built${N}" || llama_s="${R}✗ missing${N}"
+        [[ -f "$INSTALL_DIR/memory_server/.installed" ]] \
+            && mem_s="${G}✓ installed${N}" || mem_s="${R}✗ missing${N}"
+        [[ -f "$INSTALL_DIR/search_proxy/.installed" ]] \
+            && proxy_s="${G}✓ installed${N}" || proxy_s="${R}✗ missing${N}"
+        docker ps -a --filter name=searxng -q 2>/dev/null | grep -q . \
+            && searxng_s="${G}✓ container exists${N}" || searxng_s="${R}✗ not set up${N}"
+
+        echo -e "  ${W}a)${N}  llama.cpp + SYCL build   [$llama_s${N}]"
+        echo "       Clone/rebuild llama.cpp with the Intel Arc SYCL backend."
+        echo ""
+        echo -e "  ${W}b)${N}  mem0 memory server       [$mem_s${N}]"
+        echo "       Python venv + mem0ai + ChromaDB + sentence-transformers."
+        echo ""
+        echo -e "  ${W}c)${N}  SearXNG web search       [$searxng_s${N}]"
+        echo "       Docker-based private search engine on :$SEARXNG_PORT."
+        echo ""
+        echo -e "  ${W}d)${N}  Search proxy             [$proxy_s${N}]"
+        echo "       FastAPI bridge: injects SearXNG results into LLM context."
+        echo ""
+        echo "  0)  Back"
+        echo ""
+        echo -n "  Select [a/b/c/d/0]: "
+        read -r ci
+
+        case "${ci,,}" in
+            a) bash "$INSTALLER" --component llama;   PAUSE ;;
+            b) bash "$INSTALLER" --component mem0;    PAUSE ;;
+            c) setup_web_search ;;
+            d) bash "$INSTALLER" --component proxy;   PAUSE ;;
+            0) return ;;
+            *) WARN "Invalid option."; sleep 1 ;;
+        esac
+    done
+}
+
+# ================================================================
+#  16. LLM COMMAND SHELL
+#  Run llama-server or llama-cli with arbitrary flags — including
+#  the -hf <repo>:<quant> HuggingFace auto-download syntax.
+# ================================================================
+llm_command_shell() {
+    local LLAMACPP_BIN_DIR
+    LLAMACPP_BIN_DIR="$(dirname "$LLAMACPP_BIN")"
+    local LLAMA_CLI="$LLAMACPP_BIN_DIR/llama-cli"
+    local LLAMA_SRV="$LLAMACPP_BIN_DIR/llama-server"
+    _source_envs
+    _load_engine_config
+
+    if [[ ! -f "$LLAMA_SRV" ]]; then
+        ERR "llama-server not found. Run Install (option 1) or Component Installer (option 15) first."
+        PAUSE; return
+    fi
+
+    while true; do
+        clear
+        echo -e "${B}${W}"
+        echo "  ╔══════════════════════════════════════════════════════════════╗"
+        echo "  ║   🛠   LLM COMMAND SHELL                                      ║"
+        echo "  ╚══════════════════════════════════════════════════════════════╝"
+        echo -e "${N}"
+        pgrep -f "llama-server" &>/dev/null \
+            && echo -e "  Engine: ${G}● running${N}  (:${ENGINE_PORT})" \
+            || echo -e "  Engine: ${R}○ stopped${N}"
+        echo -e "  Active config: ctx ${W}${context_size}${N}  port ${W}${ENGINE_PORT}${N}  host ${W}${visible2network}${N}  gpu-layers ${W}${gpu_layers}${N}"
+        echo ""
+        echo -e "  ${W}a)${N}  llama-server — HuggingFace model / custom flags"
+        echo "       Stops the running engine, launches with your spec."
+        echo ""
+        echo -e "  ${W}b)${N}  llama-cli    — interactive CLI session"
+        echo "       Foreground session; background server stays up."
+        echo ""
+        echo -e "  ${W}c)${N}  Custom command — any llama binary + args"
+        echo ""
+        echo "  0)  Back"
+        echo ""
+        echo -n "  Select [a/b/c/0]: "
+        read -r sub
+
+        case "${sub,,}" in
+            a)
+                clear
+                STEP "llama-server — HuggingFace / custom launch"
+                echo ""
+                echo -e "  ${W}Examples:${N}"
+                echo "    -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S"
+                echo "    -hf unsloth/Llama-3.2-3B-Instruct-GGUF:*Q4_K_M*"
+                echo "    --model $MODEL_DIR/my-model.gguf --ctx-size 4096"
+                echo ""
+                echo -e "  ${Y}Default flags from Server Settings (option 14):${N}"
+                echo "    --n-gpu-layers $gpu_layers  --ctx-size $context_size  --port $ENGINE_PORT  --host $visible2network  --api-key local"
+                echo ""
+                echo -n "  Extra flags / HF spec: "
+                read -r srv_flags
+                [[ -z "$srv_flags" ]] && { WARN "No flags — aborting."; sleep 1; continue; }
+
+                INFO "Stopping existing engine…"
+                pkill -f "llama-server" 2>/dev/null || true; sleep 1
+
+                local -a SRV_CMD=(
+                    "$LLAMA_SRV"
+                    --n-gpu-layers  "$gpu_layers"
+                    --ctx-size      "$context_size"
+                    --port          "$ENGINE_PORT"
+                    --host          "$visible2network"
+                    --api-key       local
+                )
+                [[ "$flash_attention" == "1" ]] && SRV_CMD+=(--flash-attn)
+                local -a usr_args; IFS=' ' read -ra usr_args <<< "$srv_flags"
+                SRV_CMD+=("${usr_args[@]}")
+
+                echo ""; INFO "Launching: ${SRV_CMD[*]}"
+                echo -e "  ${Y}(Ctrl-C to stop — you will be asked whether to restore the stack)${N}"; echo ""
+
+                ONEAPI_DEVICE_SELECTOR="level_zero:0" \
+                SYCL_DEVICE_FILTER="level_zero:gpu" \
+                "${SRV_CMD[@]}" || true
+
+                echo ""; INFO "llama-server exited."
+                if ask "Restart the normal stack now?"; then start_stack
+                else INFO "Stack left stopped. Use option 2 to restart."; PAUSE; fi
+                ;;
+            b)
+                clear; STEP "llama-cli — interactive session"
+                if [[ ! -f "$LLAMA_CLI" ]]; then
+                    ERR "llama-cli not found — may not be built in this llama.cpp version."; PAUSE; continue
+                fi
+                echo ""
+                echo -e "  ${W}Examples:${N}"
+                echo "    -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S"
+                echo "    -hf unsloth/Llama-3.2-3B-Instruct-GGUF:*Q4_K_M*  -cnv"
+                echo "    --model $MODEL_DIR/my-model.gguf -p 'Hello!' -cnv"
+                echo ""
+                if pgrep -f "llama-server" &>/dev/null; then
+                    echo -e "  ${Y}⚠  llama-server is running — loading a second model shares VRAM.${N}"
+                    echo -e "  ${Y}   Tip: pass the same GGUF the server has loaded to avoid double load.${N}"; echo ""
+                    ask "Continue anyway?" n || continue
+                fi
+                echo -e "  ${Y}Default:${N}  --n-gpu-layers $gpu_layers"
+                echo -n "  Extra flags / HF spec: "
+                read -r cli_flags
+                [[ -z "$cli_flags" ]] && { WARN "No flags — aborting."; sleep 1; continue; }
+
+                local -a CLI_CMD=("$LLAMA_CLI" --n-gpu-layers "$gpu_layers")
+                local -a usr_cli_args; IFS=' ' read -ra usr_cli_args <<< "$cli_flags"
+                CLI_CMD+=("${usr_cli_args[@]}")
+
+                echo ""; INFO "Launching: ${CLI_CMD[*]}"
+                echo -e "  ${Y}(Type /bye or Ctrl-C to exit)${N}"; echo ""
+
+                ONEAPI_DEVICE_SELECTOR="level_zero:0" \
+                SYCL_DEVICE_FILTER="level_zero:gpu" \
+                "${CLI_CMD[@]}" || true
+
+                echo ""; OK "Session ended."; PAUSE ;;
+            c)
+                clear; STEP "Custom llama command"
+                echo ""
+                echo -e "  ${W}Binaries in $LLAMACPP_BIN_DIR:${N}"
+                ls "$LLAMACPP_BIN_DIR" 2>/dev/null | sed 's/^/    /' || WARN "Cannot list bin dir."
+                echo ""
+                echo -e "  Enter binary name + flags (bin dir prefixed automatically)."
+                echo -e "  ${C}Example: llama-server -hf unsloth/gemma-4-26B-A4B-it-GGUF:UD-Q4_K_S${N}"
+                echo ""
+                echo -n "  Command: "
+                read -r custom_cmd
+                [[ -z "$custom_cmd" ]] && { WARN "Empty input — aborting."; sleep 1; continue; }
+
+                local bin_name args_rest full_bin
+                bin_name=$(awk '{print $1}' <<< "$custom_cmd")
+                args_rest=$(cut -d' ' -f2- <<< "$custom_cmd")
+                full_bin="$LLAMACPP_BIN_DIR/$bin_name"
+                [[ ! -f "$full_bin" ]] && { WARN "Not found: $full_bin — trying PATH…"; full_bin="$bin_name"; }
+
+                echo ""; INFO "Running: $full_bin $args_rest"
+                echo -e "  ${Y}(Ctrl-C to interrupt)${N}"; echo ""
+
+                ONEAPI_DEVICE_SELECTOR="level_zero:0" \
+                SYCL_DEVICE_FILTER="level_zero:gpu" \
+                eval "$full_bin $args_rest" || true
+
+                echo ""; OK "Command exited."; PAUSE ;;
+            0) return ;;
+            *) WARN "Invalid option."; sleep 1 ;;
+        esac
+    done
+}
+
+
+# ================================================================
 main() {
     while true; do
         show_menu
@@ -896,7 +1240,10 @@ main() {
             10) validate_stack   ;;
             11) benchmark        ;;
             12) uninstall        ;;
-            13) manage_models    ;;
+            13) manage_models         ;;
+            14) server_settings       ;;
+            15) component_installer   ;;
+            16) llm_command_shell     ;;
             0)  echo "Bye!"; exit 0 ;;
             *)  WARN "Invalid option."; sleep 1 ;;
         esac
