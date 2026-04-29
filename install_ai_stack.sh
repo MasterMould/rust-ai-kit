@@ -616,28 +616,9 @@ install_memu() { install_memory_server; }   # alias so main() call still works
 install_anythingllm() {
     STEP "7/7  AnythingLLM + Search Proxy"
 
-    # ── AnythingLLM ───────────────────────────────────────────────
-    mkdir -p "$APPS_DIR"
-    local ai="$APPS_DIR/AnythingLLM.AppImage"
-    if [[ -f "$ai" ]]; then
-        OK "AnythingLLM already present."
-    elif ask "Download AnythingLLM AppImage?"; then
-        wget -q --show-progress -O "$ai" "$ANYTHINGLLM_APPIMAGE_URL"
-        chmod +x "$ai"
-        mkdir -p "$HOME/.local/share/applications" "$HOME/.local/bin"
-        cat > "$HOME/.local/share/applications/anythingllm.desktop" <<DESK
-[Desktop Entry]
-Name=AnythingLLM
-Exec=$ai
-Icon=utilities-terminal
-Type=Application
-Categories=Office;AI;
-DESK
-        ln -sf "$ai" "$HOME/.local/bin/anythingllm"
-        OK "AnythingLLM installed."
-    else
-        WARN "Skipped AnythingLLM."
-    fi
+    # AnythingLLM not installed — use any OpenAI-compatible client
+    INFO "Skipping AnythingLLM (removed from stack)."
+    INFO "Point any OpenAI-compatible client at http://localhost:\${ENGINE_PORT:-8080}/v1"
 
     # ── Search proxy ──────────────────────────────────────────────
     local PROXY_DIR="$INSTALL_DIR/search_proxy"
@@ -818,10 +799,43 @@ echo "Skipping AnythingLLM install..."   # install_anythingllm
 # ================================================================
 #  ARG PARSER
 # ================================================================
-if [[ "${1:-}" == "--update-llama" ]]; then
-    update_llamacpp
-    exit 0
-fi
+case "${1:-}" in
+    --update-llama)
+        update_llamacpp
+        exit 0
+        ;;
 
-main "$@"
+    # ── Per-component installs — called by manager option 15 ──────
+    --component)
+        # Minimal environment for standalone component runs
+        [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env" 2>/dev/null || true
+        [[ -f /opt/intel/oneapi/setvars.sh ]] &&             source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+        export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+
+        case "${2:-}" in
+            llama)
+                install_system_deps
+                install_intel_gpu_drivers
+                install_rust
+                install_llamacpp_sycl
+                ;;
+            mem0)
+                install_memory_server
+                ;;
+            proxy)
+                # install_anythingllm now only installs the search proxy
+                install_anythingllm
+                ;;
+            *)
+                echo "Usage: $0 --component <llama|mem0|proxy>"
+                exit 1
+                ;;
+        esac
+        exit 0
+        ;;
+
+    *)
+        main "$@"
+        ;;
+esac
 
