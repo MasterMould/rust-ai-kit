@@ -210,10 +210,10 @@ purge-cache:
 git-sync:
 	git add .
 	git commit -m "Station Sync: $$(date)"
-	git push origin main
+	git push 
 
 # ================================================================
-#  stop  — kill Streamlit and the AI stack
+#  stop  — Streamlit and the AI stack
 # ================================================================
 stop:
 	@echo "▶  Stopping Streamlit…"
@@ -224,6 +224,32 @@ stop:
 	fi
 	@echo "▶  Stopping AI stack (delegating to ai_stack_manager.sh)…"
 	@echo "3" | bash ai_stack_manager.sh 2>/dev/null || true
+
+# ================================================================
+#  stop  — Streamlit only
+# ================================================================
+stop-streamlit:
+	@echo "▶  Stopping Streamlit…"
+	@pkill -f "streamlit run" 2>/dev/null && echo "  Stopped Streamlit" || echo "  Streamlit not running"
+	@if [ -f logs/.streamlit_pid ]; then \
+	    kill $$(cat logs/.streamlit_pid) 2>/dev/null || true; \
+	    rm -f logs/.streamlit_pid; \
+	fi
+
+# ================================================================
+#  stop  — the AI stack only
+# ================================================================
+stop-AIstack:
+	@echo "▶  Stopping Streamlit…"
+	@pkill -f "streamlit run" 2>/dev/null && echo "  Stopped Streamlit" || echo "  Streamlit not running"
+	@if [ -f logs/.streamlit_pid ]; then \
+	    kill $$(cat logs/.streamlit_pid) 2>/dev/null || true; \
+	    rm -f logs/.streamlit_pid; \
+	fi
+	@echo "▶  Stopping AI stack (delegating to ai_stack_manager.sh)…"
+	@echo "3" | bash ai_stack_manager.sh 2>/dev/null || true
+
+
 
 # ================================================================
 #  status  — quick health check
