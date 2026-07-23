@@ -611,14 +611,10 @@ MEMSTART
 install_memu() { install_memory_server; }   # alias so main() call still works
 
 # ================================================================
-#  STEP 7 — AnythingLLM + Search Proxy
+#  STEP 7 — Search Proxy
 # ================================================================
-install_anythingllm() {
-    STEP "7/7  AnythingLLM + Search Proxy"
-
-    # AnythingLLM not installed — use any OpenAI-compatible client
-    INFO "Skipping AnythingLLM (removed from stack)."
-    INFO "Point any OpenAI-compatible client at http://localhost:\${ENGINE_PORT:-8080}/v1"
+install_search_proxy() {
+    STEP "7/7 Search Proxy"
 
     # ── Search proxy ──────────────────────────────────────────────
     local PROXY_DIR="$INSTALL_DIR/search_proxy"
@@ -790,7 +786,7 @@ main() {
     install_llamacpp_sycl
     download_model
     install_memu
-echo "Skipping AnythingLLM install..."   # install_anythingllm
+    install_search_proxy
     configure_shell
     write_startup_script
     print_summary
