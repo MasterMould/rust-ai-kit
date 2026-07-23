@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=🛑 Stop LLM Server
+GenericName=Stop AI Inference Server
+Comment=Stop the llama-server and all rust-ai-kit stack services
+Exec=env SHOW_WINDOW=1 PLACEHOLDER/stop-server.sh
+Icon=utilities-terminal
+Terminal=false
+Categories=Utility;Science;ArtificialIntelligence;
+Keywords=AI;LLM;llama;server;stop;kill;
+StartupNotify=false

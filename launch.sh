@@ -29,6 +29,8 @@ PATCH_SCRIPT="$SCRIPT_DIR/patch_core.py"
 ENGINE_PORT=8080
 STREAMLIT_PORT=8501
 
+ENABLE_WEBUI="${ENABLE_WEBUI:-0}"
+
 mkdir -p "$LOG_DIR" "$SCRIPT_DIR/logs" 2>/dev/null
 
 # ── Colours ────────────────────────────────────────────────────────
@@ -255,7 +257,7 @@ _start_engine_once() {
         --ctx-size     8192 \
         --n-gpu-layers "$GPU_LAYERS" \
         --port         "$ENGINE_PORT" \
-        --host         0.0.0.0 \
+        --host         127.0.0.1 \
         --api-key      local \
         >> "$LOG_DIR/engine.log" 2>&1 &
 
@@ -371,9 +373,10 @@ if $ENGINE_OK; then
 fi
 
 # ================================================================
-#  STEP 8 — Streamlit
+#  STEP 8 — Streamlit (optional WebUI)
 #  nohup + setsid: survives terminal close.
 # ================================================================
+if [[ "$ENABLE_WEBUI" == "1" ]]; then
 streamlit_alive() {
     curl -sf "http://localhost:${STREAMLIT_PORT}" >/dev/null 2>&1
 }
@@ -425,14 +428,20 @@ else
     done
     echo ""
 fi
+fi
 
 # ================================================================
-#  STEP 9 — Open browser
+#  STEP 9 — Open browser (optional WebUI)
 # ================================================================
-URL="http://localhost:${STREAMLIT_PORT}"
-_notify "LLM Factory ready → $URL"
-xdg-open "$URL" 2>/dev/null &
-
+if [[ "$ENABLE_WEBUI" == "1" ]]; then
+    URL="http://localhost:${STREAMLIT_PORT}"
+    streamlit_alive \
+        && echo -e "  ${G}🟢 Streamlit  →  ${C}${URL}${N}" \
+        || echo -e "  ${R}🔴 Streamlit :${STREAMLIT_PORT}${N}"
+else
+    echo -e "  ${Y}⚪ WebUI disabled (use launch.sh --webui to enable)${N}"
+    sleep 5
+fi
 # ── Final status summary ──────────────────────────────────────────
 echo ""
 sep
@@ -445,8 +454,13 @@ curl -sf http://localhost:8000/health >/dev/null 2>&1 \
 curl -sf http://localhost:8090/health >/dev/null 2>&1 \
     && echo -e "  ${G}🟢 Proxy     :8090${N}" \
     || echo -e "  ${Y}⚪ Proxy     :8090${N}"
+if [[ "$ENABLE_WEBUI" == "1" ]]; then
 streamlit_alive \
     && echo -e "  ${G}🟢 Streamlit  →  ${C}${URL}${N}" \
     || echo -e "  ${R}🔴 Streamlit :${STREAMLIT_PORT}${N}"
+else
+    echo -e "  ${Y}⚪ WebUI disabled (use launch.sh --webui to enable)${N}"
+fi    
 sep
+sleep 5
 echo ""

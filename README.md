@@ -305,3 +305,319 @@ MIT — do whatever you like with it.
 **Built for people who believe their AI should run on their hardware.**  
 *Intel Arc A770 · llama.cpp SYCL · mem0 · SearXNG · Ubuntu 24.04 · oneAPI 2025*  
  </div>  
+
+# 🦀 rust-ai-kit — Local AI Stack (Intel Arc A770, SYCL)
+
+A fully local, GPU-accelerated AI stack designed for **zero cloud dependency**, **self-healing execution**, and **one-command startup**.
+
+Built for power users who want performance, control, and reliability — without babysitting fragile scripts.
+
+---
+
+# 🚀 Overview
+
+rust-ai-kit installs and runs a complete local LLM environment:
+
+* ⚡ **llama.cpp (SYCL backend)** — full Intel Arc GPU acceleration
+* 🧠 **Llama 3.1 8B (GGUF)** — high-quality local model
+* 💾 **Memory server (mem0 + ChromaDB)** — long-term context
+* 🌐 **Search proxy** — optional web grounding
+* 🖥️ **Streamlit Web UI** — optional interface layer
+* 🔁 **Self-healing launcher** — detects and fixes issues automatically
+
+---
+
+# ✨ Core Features
+
+## 1. 🔥 Full GPU Acceleration (Intel Arc A770)
+
+**Purpose:** Use your GPU instead of CPU for massive speed gains.
+
+**How it works:**
+
+* Uses SYCL + Level Zero backend
+* Automatically detects GPU availability
+* Falls back to CPU if needed
+
+**Benefits:**
+
+* 5–20x faster inference
+* Full 8B model fits in 16GB VRAM
+* No manual tuning required
+
+---
+
+## 2. 🤖 llama.cpp (SYCL Build)
+
+**Purpose:** High-performance inference engine
+
+**Features:**
+
+* Built with Intel oneAPI (icx/icpx)
+* FP16 acceleration enabled
+* Optional BitNet support
+
+**Usage:**
+Automatically compiled during install.
+
+---
+
+## 3. 🧠 Smart Model Management
+
+**Purpose:** Ensure a model is always available and valid
+
+**Behavior:**
+
+* Auto-detects `.gguf` models
+* Stores active model in config
+* Auto-recovers from missing/broken model
+
+**Example:**
+
+```bash
+./launch.sh
+```
+
+---
+
+## 4. 🔁 Self-Healing Engine Startup
+
+**Purpose:** Start reliably without manual debugging
+
+**Detects and fixes:**
+
+* GPU driver issues
+* Missing `libze-intel-gpu1`
+* Port conflicts
+* Model loading errors
+
+**Behavior:**
+
+* Retries up to 3 times
+* Applies automatic fixes between attempts
+
+---
+
+## 5. 🛠️ Auto GPU Repair System
+
+**Fixes automatically:**
+
+* Missing `render` / `video` groups
+* Missing Level Zero drivers
+* Session permission issues
+
+**Benefit:**
+No reboot or manual intervention required in most cases
+
+---
+
+## 6. 💾 Memory Server (mem0 + ChromaDB)
+
+**Purpose:** Persistent long-term memory for conversations
+
+**Features:**
+
+* Embedding-based recall
+* Local vector database
+* Automatic startup
+
+**Endpoint:**
+
+```
+http://localhost:8000
+```
+
+---
+
+## 7. 🌐 Search Proxy (Optional Web Grounding)
+
+**Purpose:** Allow LLM to access web results
+
+**How it works:**
+
+* Proxies queries via SearXNG
+* Injects results into LLM context
+
+**Endpoint:**
+
+```
+http://localhost:8090
+```
+
+---
+
+## 8. 🖥️ Streamlit Web UI (Optional)
+
+**Purpose:** Provide a user-friendly interface
+
+**Default:** OFF
+
+**Enable:**
+
+```bash
+./launch.sh --webui
+```
+
+**Features:**
+
+* Chat interface
+* Stack control panel
+* Logs and diagnostics
+
+---
+
+## 9. 🌐 Browser Auto-Launch
+
+**Purpose:** Open UI automatically when enabled
+
+Triggered only when WebUI is active.
+
+---
+
+## 10. ⚙️ Dual-Mode Launcher
+
+Run the system in two modes:
+
+### Headless Mode (default)
+
+```bash
+./launch.sh
+```
+
+* Engine + memory + proxy
+* No UI
+
+### WebUI Mode
+
+```bash
+./launch.sh --webui
+```
+
+* Full stack
+* Opens browser
+
+---
+
+## 11. 🧵 Background Service Persistence
+
+All services use:
+
+* `nohup`
+* `setsid`
+
+**Result:**
+
+* Survive terminal close
+* Continue running in background
+
+---
+
+## 12. 📜 Logging System
+
+Logs stored in:
+
+```
+~/ai_stack/logs/
+```
+
+Includes:
+
+* engine.log
+* memory.log
+* proxy.log
+* streamlit.log
+
+---
+
+## 13. 🧪 Auto-Diagnostics
+
+If startup fails:
+
+* Reads logs
+* Identifies issue
+* Applies fix
+* Retries
+
+---
+
+## 14. 📦 Model Preservation (Uninstaller)
+
+**Default behavior:**
+
+* Keeps downloaded models
+
+**Optional:**
+
+* User can choose to delete them
+
+---
+
+# 🧰 Usage Guide
+
+## Start everything
+
+```bash
+./launch.sh
+```
+
+## Start with UI
+
+```bash
+./launch.sh --webui
+```
+
+## Force headless
+
+```bash
+./launch.sh --headless
+```
+
+---
+
+# 🔌 API Access
+
+### LLM API
+
+```
+http://localhost:8080/v1
+```
+
+### Memory API
+
+```
+http://localhost:8000
+```
+
+### Search Proxy
+
+```
+http://localhost:8090
+```
+
+---
+
+# 🧠 Design Philosophy
+
+* **Zero babysitting** — fixes itself
+* **Local-first** — no cloud required
+* **Performance-first** — GPU by default
+* **Fail-soft** — degrades gracefully
+* **User-respecting** — never deletes data silently
+
+---
+
+# ⚡ Requirements
+
+* Ubuntu 24.04
+* Intel Arc A770 (16GB recommended)
+* ~8GB free disk space
+
+---
+
+# 🏁 Final Thoughts
+
+rust-ai-kit is not just an installer.
+
+It’s a **self-healing local AI runtime** that behaves more like a service than a script.
+
+Start it once — and it takes care of the rest.

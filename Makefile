@@ -22,6 +22,8 @@ setup:
 	$(PIP) install \
 	    streamlit \
 	    requests \
+	    requests-ratelimiter \
+	    urllib3 \
 	    PyPDF2 \
 	    python-pam \
 	    bandit \
@@ -37,9 +39,11 @@ setup:
 	@echo "▶  Adding $$USER to shadow group (needed for PAM password verification)…"
 	sudo usermod -aG shadow $$USER
 	@echo "▶  Making scripts executable…"
-	chmod +x $(LAUNCH)
+	chmod +x $(LAUNCH) run-desktop.sh run-server-window.sh server-window.sh stop-server.sh
 	@echo "▶  Installing desktop icon…"
 	$(MAKE) install-desktop
+	@echo "▶  Installing server Start/Stop icons…"
+	$(MAKE) install-server-icons
 	@echo ""
 	@echo "  ✅  Setup complete."
 	@echo ""
@@ -70,71 +74,47 @@ launch:
 	bash $(LAUNCH)
 
 # ================================================================
-#  install-desktop  — generate and install all three .desktop launchers:
-#    1. rust-ai-kit.desktop          — Start (LLM Factory)
-#    2. rust-ai-kit-stop.desktop     — Stop all services
-#    3. rust-ai-kit-manager.desktop  — Open ai_stack_manager.sh
+#  install-desktop  — generate and install the .desktop launcher
+#  Writes the file content directly so there is never a stale
+#  placeholder path.  The .desktop spec forbids shell metacharacters
+#  in Exec — all logic lives in run-desktop.sh.
 # ================================================================
 install-desktop:
 	@echo "▶  Making scripts executable..."
-	chmod +x $(LAUNCH) run-desktop.sh stop-desktop.sh stack-manager-desktop.sh
+	chmod +x $(LAUNCH) run-desktop.sh
+	@echo "▶  Writing desktop launcher..."
 	mkdir -p $(DESKTOP_DIR)
-
-	@# ── 1. Start ──────────────────────────────────────────────────
-	@printf '[Desktop Entry]\nVersion=1.0\nType=Application\n'                > $(DESKTOP_DIR)/rust-ai-kit.desktop
-	@printf 'Name=rust-ai-kit LLM Factory\nGenericName=Local AI Assistant\n'>> $(DESKTOP_DIR)/rust-ai-kit.desktop
-	@printf 'Comment=Start the rust-ai-kit stack and open the UI\n'          >> $(DESKTOP_DIR)/rust-ai-kit.desktop
-	@printf 'Exec=%s/run-desktop.sh\n'           "$(CURDIR)"                 >> $(DESKTOP_DIR)/rust-ai-kit.desktop
-	@printf 'Icon=utilities-terminal\nTerminal=false\n'                      >> $(DESKTOP_DIR)/rust-ai-kit.desktop
-	@printf 'Categories=Utility;\nStartupNotify=true\n'                      >> $(DESKTOP_DIR)/rust-ai-kit.desktop
-	@chmod 644 $(DESKTOP_DIR)/rust-ai-kit.desktop
-	@echo "  ✅  rust-ai-kit.desktop (Start)"
-
-	@# ── 2. Stop ───────────────────────────────────────────────────
-	@printf '[Desktop Entry]\nVersion=1.0\nType=Application\n'                > $(DESKTOP_DIR)/rust-ai-kit-stop.desktop
-	@printf 'Name=rust-ai-kit Stop\nGenericName=Stop AI Stack\n'             >> $(DESKTOP_DIR)/rust-ai-kit-stop.desktop
-	@printf 'Comment=Stop llama-server memory-server proxy and Streamlit\n'  >> $(DESKTOP_DIR)/rust-ai-kit-stop.desktop
-	@printf 'Exec=%s/stop-desktop.sh\n'          "$(CURDIR)"                 >> $(DESKTOP_DIR)/rust-ai-kit-stop.desktop
-	@printf 'Icon=process-stop\nTerminal=false\n'                            >> $(DESKTOP_DIR)/rust-ai-kit-stop.desktop
-	@printf 'Categories=Utility;\nStartupNotify=false\n'                     >> $(DESKTOP_DIR)/rust-ai-kit-stop.desktop
-	@chmod 644 $(DESKTOP_DIR)/rust-ai-kit-stop.desktop
-	@echo "  ✅  rust-ai-kit-stop.desktop (Stop)"
-
-	@# ── 3. Stack Manager ──────────────────────────────────────────
-	@printf '[Desktop Entry]\nVersion=1.0\nType=Application\n'                > $(DESKTOP_DIR)/rust-ai-kit-manager.desktop
-	@printf 'Name=rust-ai-kit Stack Manager\nGenericName=AI Stack Manager\n' >> $(DESKTOP_DIR)/rust-ai-kit-manager.desktop
-	@printf 'Comment=Interactive management menu for the rust-ai-kit stack\n'>> $(DESKTOP_DIR)/rust-ai-kit-manager.desktop
-	@printf 'Exec=%s/stack-manager-desktop.sh\n' "$(CURDIR)"                 >> $(DESKTOP_DIR)/rust-ai-kit-manager.desktop
-	@printf 'Icon=utilities-system-monitor\nTerminal=false\n'                >> $(DESKTOP_DIR)/rust-ai-kit-manager.desktop
-	@printf 'Categories=Utility;\nStartupNotify=false\n'                     >> $(DESKTOP_DIR)/rust-ai-kit-manager.desktop
-	@chmod 644 $(DESKTOP_DIR)/rust-ai-kit-manager.desktop
-	@echo "  ✅  rust-ai-kit-manager.desktop (Stack Manager)"
-
-	@# ── Copy all to ~/Desktop and trust ──────────────────────────
+	@# Write the .desktop file directly — no sed, no placeholder
+	@printf '[Desktop Entry]\n' > $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Version=1.0\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Type=Application\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Name=rust-ai-kit LLM Factory\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'GenericName=Local AI Assistant\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Comment=Start the rust-ai-kit stack and open the LLM Factory UI\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Exec=%s/run-desktop.sh\n' "$(CURDIR)" >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Icon=utilities-terminal\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Terminal=false\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Categories=Utility;\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'Keywords=AI;LLM;chat;llama;Intel;Arc;\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	@printf 'StartupNotify=true\n' >> $(DESKTOP_DIR)/$(DESKTOP)
+	chmod 644 $(DESKTOP_DIR)/$(DESKTOP)
+	@echo "  ✅  Written: $(DESKTOP_DIR)/$(DESKTOP)"
+	@# Copy to ~/Desktop and trust it
 	@if [ -d "$(HOME)/Desktop" ]; then \
-	    for f in rust-ai-kit.desktop rust-ai-kit-stop.desktop rust-ai-kit-manager.desktop; do \
-	        cp $(DESKTOP_DIR)/$$f $(HOME)/Desktop/$$f 2>/dev/null || true; \
-	        chmod 644 $(HOME)/Desktop/$$f; \
-	        gio trust $(HOME)/Desktop/$$f 2>/dev/null || true; \
-	    done; \
-	    echo "  ✅  All three copied to ~/Desktop and trusted"; \
+	    cp $(DESKTOP_DIR)/$(DESKTOP) $(HOME)/Desktop/$(DESKTOP); \
+	    chmod 644 $(HOME)/Desktop/$(DESKTOP); \
+	    gio trust $(HOME)/Desktop/$(DESKTOP) 2>/dev/null || true; \
+	    echo "  ✅  Copied to ~/Desktop/$(DESKTOP) (trusted)"; \
 	fi
-
-	@# ── Validate all ─────────────────────────────────────────────
+	@# Validate
 	@if command -v desktop-file-validate >/dev/null 2>&1; then \
-	    for f in rust-ai-kit.desktop rust-ai-kit-stop.desktop rust-ai-kit-manager.desktop; do \
-	        desktop-file-validate $(DESKTOP_DIR)/$$f \
-	            && echo "  ✅  $$f OK" \
-	            || echo "  ❌  $$f FAILED"; \
-	    done; \
+	    desktop-file-validate $(DESKTOP_DIR)/$(DESKTOP) \
+	        && echo "  ✅  Validates OK" \
+	        || (echo "  ❌  Validation failed" && exit 1); \
 	fi
 	@command -v update-desktop-database >/dev/null 2>&1 && \
 	    update-desktop-database $(DESKTOP_DIR) 2>/dev/null || true
-	@echo ""
-	@echo "  Three shortcuts on your Desktop:"
-	@echo "    🟢 rust-ai-kit LLM Factory   — start everything + open browser"
-	@echo "    🔴 rust-ai-kit Stop           — stop all services"
-	@echo "    ⚙️  rust-ai-kit Stack Manager  — full management menu"
+	@echo "  ✅  Done. Click the icon on your Desktop to launch."
 
 # ================================================================
 #  install-autostart  — start the stack automatically on login
@@ -151,7 +131,81 @@ install-autostart:
 	@echo "  ✅  Autostart installed — stack will start at login"
 
 # ================================================================
-#  git-sync  — commit and push everything (respects .gitignore)
+#  start-server  — open llama-server in its own terminal window
+# ================================================================
+start-server:
+	@chmod +x run-server-window.sh server-window.sh
+	@bash run-server-window.sh
+
+# ================================================================
+#  stop-server  — stop llama-server + memory + proxy
+# ================================================================
+stop-server:
+	@bash stop-server.sh
+
+# ================================================================
+#  install-server-icons  — install Start/Stop .desktop launchers
+#  into both the application menu and the Desktop folder.
+# ================================================================
+install-server-icons:
+	@echo "▶  Installing server Start/Stop desktop icons…"
+	@chmod +x run-server-window.sh server-window.sh stop-server.sh
+	@mkdir -p $(DESKTOP_DIR)
+	@# --- Start icon ---
+	@sed "s|PLACEHOLDER|$(CURDIR)|g" llm-server-start.desktop \
+	    > $(DESKTOP_DIR)/llm-server-start.desktop
+	@chmod 644 $(DESKTOP_DIR)/llm-server-start.desktop
+	@if [ -d "$(HOME)/Desktop" ]; then \
+	    cp $(DESKTOP_DIR)/llm-server-start.desktop $(HOME)/Desktop/; \
+	    chmod 644 $(HOME)/Desktop/llm-server-start.desktop; \
+	    gio trust $(HOME)/Desktop/llm-server-start.desktop 2>/dev/null || true; \
+	    echo "  ✅  Start icon → ~/Desktop/"; \
+	fi
+	@# --- Stop icon ---
+	@sed "s|PLACEHOLDER|$(CURDIR)|g" llm-server-stop.desktop \
+	    > $(DESKTOP_DIR)/llm-server-stop.desktop
+	@chmod 644 $(DESKTOP_DIR)/llm-server-stop.desktop
+	@if [ -d "$(HOME)/Desktop" ]; then \
+	    cp $(DESKTOP_DIR)/llm-server-stop.desktop $(HOME)/Desktop/; \
+	    chmod 644 $(HOME)/Desktop/llm-server-stop.desktop; \
+	    gio trust $(HOME)/Desktop/llm-server-stop.desktop 2>/dev/null || true; \
+	    echo "  ✅  Stop icon  → ~/Desktop/"; \
+	fi
+	@command -v update-desktop-database >/dev/null 2>&1 && \
+	    update-desktop-database $(DESKTOP_DIR) 2>/dev/null || true
+	@echo "  ✅  Icons installed — look for them in your app launcher."
+
+# ================================================================
+#  fix-deps  — install any missing pip packages into the venv
+#              and purge stale __pycache__ bytecode
+#              Run this after a git pull that adds new dependencies.
+# ================================================================
+fix-deps:
+	@if [ ! -d "$(VENV)" ]; then \
+	    echo "❌  venv not found — run 'make setup' first."; exit 1; \
+	fi
+	@echo "▶  Installing / upgrading dependencies…"
+	$(PIP) install --upgrade \
+	    requests-ratelimiter \
+	    urllib3 \
+	    streamlit \
+	    requests \
+	    PyPDF2
+	@echo "▶  Purging stale __pycache__ bytecode…"
+	find . -type d -name __pycache__ ! -path "./.git/*" -exec rm -rf {} + 2>/dev/null || true
+	find . -name "*.pyc" ! -path "./.git/*" -delete 2>/dev/null || true
+	@echo "  ✅  Done. Start the app with:  make run"
+
+# ================================================================
+#  purge-cache  — clear __pycache__ only (no pip changes)
+# ================================================================
+purge-cache:
+	@echo "▶  Purging __pycache__…"
+	find . -type d -name __pycache__ ! -path "./.git/*" -exec rm -rf {} + 2>/dev/null || true
+	find . -name "*.pyc" ! -path "./.git/*" -delete 2>/dev/null || true
+	@echo "  ✅  Bytecode cache cleared."
+
+
 # ================================================================
 git-sync:
 	git add .
@@ -239,4 +293,4 @@ lint:
 test:
 	$(VENV)/bin/pytest tests/ -v 2>/dev/null || echo "No tests yet"
 
-.PHONY: setup run launch install-desktop install-autostart git-sync stop stop-streamlit stop-AIstack status add-user lint test
+.PHONY: setup run launch install-desktop install-autostart start-server stop-server install-server-icons fix-deps purge-cache git-sync stop status add-user lint test

@@ -5,9 +5,10 @@
 #  Components: WasmEdge+GGML-SYCL · LlamaEdge · MemU · AnythingLLM
 # ================================================================
 
-# Put this in .bashrc to access llama server & CLI: export PATH="$HOME/ai_stack/llama.cpp/build/bin:$PATH"
-
-set -euo pipefail
+#set -euo pipefail
+# Optional debug + features
+[[ "${DEBUG:-0}" == "1" ]] && set -x
+USE_BITNET="${USE_BITNET:-}"
 
 # ── Colours ─────────────────────────────────────────────────────
 R='\033[0;31m' G='\033[0;32m' Y='\033[1;33m'
@@ -36,15 +37,64 @@ MODEL_NAME="Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 MODEL_URL="https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF/resolve/main/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"
 MODEL_PATH="$MODEL_DIR/$MODEL_NAME"
 
-# ── Helper ───────────────────────────────────────────────────────
+# ================================================================
+#  Helpers
+# ================================================================
 ask() {
     local yn="[Y/n]"; [[ "${2:-y}" == "n" ]] && yn="[y/N]"
     read -rp "$(echo -e "${Y}  ❓  $1 $yn: ${N}")" r
     r="${r:-${2:-y}}"
     [[ "${r,,}" == "y" ]]
 }
+PAUSE() {
+     read -rp "$(echo -e "${Y}  Press Enter to continue…${N}")"; 
+}
 
-PAUSE() { read -rp "$(echo -e "${Y}  Press Enter to continue…${N}")"; }
+#  CMake generator guard (surgical, safe, verbose)
+ensure_cmake_generator() {
+    local build_dir="$1"
+    local desired_gen="$2"
+
+    local cache_file="$build_dir/CMakeCache.txt"
+
+    if [[ ! -f "$cache_file" ]]; then
+        INFO "No existing CMake cache — fresh configure."
+        return 0
+    fi
+
+    local current_gen
+    current_gen=$(grep "CMAKE_GENERATOR:INTERNAL=" "$cache_file" \
+        | cut -d= -f2 || true)
+
+    if [[ -z "$current_gen" ]]; then
+        WARN "Could not detect existing generator — cleaning to be safe."
+        rm -rf "$build_dir"
+        return 0
+    fi
+
+    if [[ "$current_gen" == "$desired_gen" ]]; then
+        OK "CMake generator matches ($desired_gen) — reusing build directory."
+        return 0
+    fi
+
+    echo ""
+    WARN "CMake generator mismatch detected:"
+    echo -e "  Existing: ${Y}$current_gen${N}"
+    echo -e "  Required: ${Y}$desired_gen${N}"
+    echo ""
+
+    if ask "Clean build directory to fix this automatically?" "y"; then
+        INFO "Cleaning build directory (safe reset)…"
+        rm -rf "$build_dir"
+        OK "Build directory reset."
+    else
+        ERR "Cannot continue with mismatched generator."
+    fi
+}
+
+# ── User config (set during install) ─────────────────────────────
+ENABLE_DEBUG=0
+ENABLE_BITNET=0
 
 # ================================================================
 #  PREFLIGHT
@@ -54,6 +104,15 @@ preflight() {
     [[ "$(uname -m)" == "x86_64" ]] || ERR "x86_64 required."
 
     echo -e "${W}  GPU detection:${N}"
+# Method 1    
+        if clinfo | grep -i "Device Name" | grep -iq "Arc"; then
+    OK "  Intel Arc GPU visible via OpenCL"
+    else
+        WARN "  Intel Arc GPU NOT fully visible via OpenCL"
+    fi
+
+# Method 2
+    
     if lspci | grep -qi "Arc A770"; then
         OK "Intel Arc A770 detected."
     else
@@ -63,6 +122,7 @@ preflight() {
 
     echo ""
     INFO "Available disk: $(df -h "$HOME" | awk 'NR==2{print $4}') free"
+    INFO "System RAM: $(free -h | awk '/Mem:/ {print $2}')"
     WARN "The 8B model download is ~5 GB. Ensure you have ~8 GB free total."
     ask "Continue?" || exit 0
 }
@@ -80,6 +140,25 @@ install_system_deps() {
         gpg-agent software-properties-common \
         ocl-icd-libopencl1           # OpenCL ICD loader
     OK "System packages installed."
+}
+
+configure_options() {
+    STEP "Configuration"
+
+    if ask "Enable debug mode (verbose build logs)?" "n"; then
+        ENABLE_DEBUG=1
+        set -x
+        INFO "Debug mode enabled."
+    else
+        INFO "Debug mode disabled."
+    fi
+
+    if ask "Enable BitNet support (experimental)?" "n"; then
+        ENABLE_BITNET=1
+        INFO "BitNet support enabled."
+    else
+        INFO "BitNet disabled."
+    fi
 }
 
 # ================================================================
@@ -192,8 +271,61 @@ https://apt.repos.intel.com/oneapi all main" \
 }
 
 # ================================================================
-#  STEP 3 — Rust
+#  STEP 3 — Uninstall
 # ================================================================
+write_uninstall_script() {
+    STEP "Writing uninstall script"
+
+    local UNINSTALL_PATH="$INSTALL_DIR/../uninstall_ai_stack.sh"
+
+    cat > "$UNINSTALL_PATH" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+INSTALL_DIR="$HOME/ai_stack"
+MODEL_DIR="$INSTALL_DIR/models"
+
+echo "🧹 AI Stack Uninstaller"
+echo ""
+
+if [[ ! -d "$INSTALL_DIR" ]]; then
+    echo "Nothing to uninstall."
+    exit 0
+fi
+
+read -rp "Remove downloaded models as well? [y/N]: " rm_models
+rm_models="${rm_models:-n}"
+
+echo ""
+echo "Removing core stack..."
+
+# Remove everything except models (handled separately)
+if [[ -d "$INSTALL_DIR" ]]; then
+    find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name models -exec rm -rf {} +
+fi
+
+# Handle models separately
+if [[ "${rm_models,,}" == "y" ]]; then
+    echo "Removing models..."
+    rm -rf "$MODEL_DIR"
+else
+    echo "Keeping models at: $MODEL_DIR"
+fi
+
+# Clean up desktop + symlinks
+rm -f "$HOME/.local/bin/anythingllm" 2>/dev/null || true
+rm -f "$HOME/.local/share/applications/anythingllm.desktop" 2>/dev/null || true
+
+echo ""
+echo "✅ Uninstall complete."
+echo "📦 Remaining (if kept): $MODEL_DIR"
+EOF
+
+    chmod +x "$UNINSTALL_PATH"
+    OK "Uninstall script created → $UNINSTALL_PATH"
+}
+
+
 install_rust() {
     STEP "3/7  Rust toolchain"
     if command -v cargo &>/dev/null; then
@@ -207,19 +339,77 @@ install_rust() {
 }
 
 # ================================================================
+#  UPDATE — llama.cpp (fast path rebuild)
+# ================================================================
+update_llamacpp() {
+    STEP "Updating llama.cpp (pull + rebuild)"
+
+    if [[ ! -d "$LLAMACPP_DIR/.git" ]]; then
+        ERR "llama.cpp not installed yet. Run full installer first."
+    fi
+
+    INFO "Pulling latest changes…"
+    git -C "$LLAMACPP_DIR" fetch --all
+    git -C "$LLAMACPP_DIR" reset --hard origin/master
+
+    # ── Locate Intel compilers again ─────────────────────────────
+    local ICX_BIN ICPX_BIN
+    ICX_BIN=$(command -v icx 2>/dev/null) \
+        || ICX_BIN=$(find /opt/intel/oneapi -name icx -type f 2>/dev/null | head -1)
+
+    ICPX_BIN=$(command -v icpx 2>/dev/null) \
+        || ICPX_BIN=$(find /opt/intel/oneapi -name icpx -type f 2>/dev/null | head -1)
+
+    [[ -z "$ICX_BIN" || -z "$ICPX_BIN" ]] && ERR "Intel compilers not found."
+
+    export PATH="$(dirname "$ICX_BIN"):$PATH"
+    export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
+
+    # Load oneAPI env if present
+    [[ -f /opt/intel/oneapi/setvars.sh ]] && \
+        source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
+
+    # Optional BitNet
+    local BITNET_FLAG=""
+    [[ "${ENABLE_BITNET:-0}" == "1" ]] && BITNET_FLAG="-DGGML_USE_BITNET=ON"
+
+# ── Ensure generator consistency ───────────────────────────────
+ensure_cmake_generator "$LLAMACPP_DIR/build" "Ninja"
+
+# ── Configure ────────────────────────────────────────────────
+INFO "Configuring cmake with SYCL backend${BITNET_FLAG:+ + BitNet}…"
+
+cmake -B "$LLAMACPP_DIR/build" \
+    -S "$LLAMACPP_DIR" \
+    -G Ninja \
+    -DGGML_SYCL=ON \
+    $BITNET_FLAG \
+    -DCMAKE_C_COMPILER="$ICX_BIN" \
+    -DCMAKE_CXX_COMPILER="$ICPX_BIN" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DGGML_SYCL_F16=ON
+
+    INFO "Rebuilding…"
+    cmake --build "$LLAMACPP_DIR/build" -j"$(nproc)"
+
+    [[ -f "$LLAMACPP_BIN" ]] \
+        && OK "llama.cpp updated successfully 🚀" \
+        || ERR "Update failed — binary missing."
+}
+
+# ================================================================
 #  STEP 4 — llama.cpp built with SYCL (Intel Arc A770)
 # ================================================================
 install_llamacpp_sycl() {
     STEP "4/7  llama.cpp + SYCL backend (Intel Arc A770)"
 
-    if [[ -f "$LLAMACPP_BIN" ]]; then
-        OK "llama-server already built: $LLAMACPP_BIN"
-        return
-    fi
+  #  if [[ -f "$LLAMACPP_BIN" ]]; then
+  #      OK "llama-server already built: $LLAMACPP_BIN"
+  #      return
+  #  fi
 
     # ── Locate Intel icx/icpx compilers ──────────────────────────
-    # setvars.sh may not exist if only the compiler package (not full
-    # toolkit) is installed. Find icx directly in the oneAPI tree.
+    echo "--- Locate Intel icx/icpx compilers ---"
     local ICX_BIN ICPX_BIN ONEAPI_BIN
     ICX_BIN=$(command -v icx 2>/dev/null) \
         || ICX_BIN=$(find /opt/intel/oneapi -name icx  -type f 2>/dev/null | sort -r | head -1) \
@@ -235,25 +425,61 @@ install_llamacpp_sycl() {
     ONEAPI_BIN=$(dirname "$ICX_BIN")
     export PATH="$ONEAPI_BIN:$PATH"
 
-    # Source setvars.sh if it exists (sets library paths), otherwise set manually
-    if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
-        source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
+    # ── SYCL performance tweak ───────────────────────────────────
+    export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
+
+    # ── Source environment ───────────────────────────────────────
+echo "--- Source environment ---"
+
+# Prefer official oneAPI environment setup
+if [[ -f /opt/intel/oneapi/setvars.sh ]]; then
+    INFO "Sourcing Intel oneAPI environment…"
+    # shellcheck disable=SC1091
+    source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1
+
+    # Sanity check: ensure SYCL is actually usable
+    if command -v icx &>/dev/null && command -v icpx &>/dev/null; then
+        OK "oneAPI environment loaded (icx/icpx available)"
     else
-        # Find the SYCL runtime lib dir and add it
-        local SYCL_LIB
-        SYCL_LIB=$(find /opt/intel/oneapi -name "libsycl.so*" -type f 2>/dev/null \
-                   | head -1 | xargs dirname 2>/dev/null) || true
-        [[ -n "$SYCL_LIB" ]] && export LD_LIBRARY_PATH="$SYCL_LIB:${LD_LIBRARY_PATH:-}"
+        WARN "setvars.sh loaded, but compilers not found in PATH"
     fi
 
-    OK "Using Intel compilers: $ICX_BIN / $ICPX_BIN"
+else
+    WARN "setvars.sh not found — falling back to manual SYCL detection"
 
-    # Extra build deps
+    # Try to locate libsycl dynamically
+    local SYCL_LIB
+    SYCL_LIB=$(find /opt/intel/oneapi -type f -name "libsycl.so*" 2>/dev/null \
+               | sort -r | head -1 | xargs dirname 2>/dev/null) || true
+
+    if [[ -n "$SYCL_LIB" ]]; then
+        export LD_LIBRARY_PATH="$SYCL_LIB:${LD_LIBRARY_PATH:-}"
+        OK "Found SYCL runtime → $SYCL_LIB"
+    else
+        WARN "Could not locate libsycl.so — SYCL backend may fail"
+    fi
+
+    # Also try to locate compiler bin dir
+    local ONEAPI_BIN
+    ONEAPI_BIN=$(find /opt/intel/oneapi -type f -name icx 2>/dev/null \
+                 | sort -r | head -1 | xargs dirname 2>/dev/null) || true
+
+    if [[ -n "$ONEAPI_BIN" ]]; then
+        export PATH="$ONEAPI_BIN:$PATH"
+        OK "Added oneAPI compiler path → $ONEAPI_BIN"
+    else
+        WARN "icx compiler not found in fallback search"
+    fi
+fi
+
+    # ── Extra build deps ─────────────────────────────────────────
+    echo "--- Extra build deps ---"
     INFO "Installing build dependencies…"
     sudo apt-get install -y --no-install-recommends \
         ninja-build libopenblas-dev
 
-    # Clone or update
+    # ── Clone or update ──────────────────────────────────────────
+    echo "--- Clone or update ---"
     if [[ -d "$LLAMACPP_DIR/.git" ]]; then
         INFO "Updating llama.cpp repo…"
         git -C "$LLAMACPP_DIR" pull --ff-only
@@ -262,22 +488,38 @@ install_llamacpp_sycl() {
         git clone --depth=1 "$LLAMACPP_REPO" "$LLAMACPP_DIR"
     fi
 
-    INFO "Configuring cmake with SYCL backend…"
+    # ── BitNet toggle (interactive config) ───────────────────────
+    echo "--- BitNet toggle ---"
+    local BITNET_FLAG=""
+    if [[ "${ENABLE_BITNET:-0}" == "1" ]]; then
+        BITNET_FLAG="-DGGML_USE_BITNET=ON"
+        INFO "BitNet support: ENABLED"
+    else
+        INFO "BitNet support: disabled"
+    fi
+
+    # ── Configure ────────────────────────────────────────────────
+    echo "--- Configure ---"
+    INFO "Configuring cmake with SYCL backend${BITNET_FLAG:+ + BitNet}…"
     cmake -B "$LLAMACPP_DIR/build" \
         -S "$LLAMACPP_DIR" \
         -G Ninja \
         -DGGML_SYCL=ON \
+        $BITNET_FLAG \
         -DCMAKE_C_COMPILER="$ICX_BIN" \
         -DCMAKE_CXX_COMPILER="$ICPX_BIN" \
         -DCMAKE_BUILD_TYPE=Release \
         -DGGML_SYCL_F16=ON
 
+    # ── Build ────────────────────────────────────────────────────
+    echo "--- Build ---"
     INFO "Building llama.cpp (using $(nproc) cores — takes a few minutes)…"
     cmake --build "$LLAMACPP_DIR/build" --config Release -j"$(nproc)"
 
     [[ -f "$LLAMACPP_BIN" ]] \
         && OK "llama-server built → $LLAMACPP_BIN" \
         || ERR "Build completed but llama-server binary not found — check build output above."
+    PAUSE
 }
 
 # ================================================================
@@ -291,7 +533,8 @@ download_model() {
         OK "Model already present: $MODEL_PATH"
     else
         INFO "Downloading from Hugging Face — grab a coffee ☕…"
-        wget -q --show-progress -O "$MODEL_PATH" "$MODEL_URL"
+        wget --continue --tries=5 --timeout=30 \
+    --show-progress -O "$MODEL_PATH" "$MODEL_URL"
         OK "Model saved → $MODEL_PATH"
     fi
 }
@@ -368,33 +611,10 @@ MEMSTART
 install_memu() { install_memory_server; }   # alias so main() call still works
 
 # ================================================================
-#  STEP 7 — AnythingLLM + Search Proxy
+#  STEP 7 — Search Proxy
 # ================================================================
-install_anythingllm() {
-    STEP "7/7  AnythingLLM + Search Proxy"
-
-    # ── AnythingLLM ───────────────────────────────────────────────
-    mkdir -p "$APPS_DIR"
-    local ai="$APPS_DIR/AnythingLLM.AppImage"
-    if [[ -f "$ai" ]]; then
-        OK "AnythingLLM already present."
-    elif ask "Download AnythingLLM AppImage?"; then
-        wget -q --show-progress -O "$ai" "$ANYTHINGLLM_APPIMAGE_URL"
-        chmod +x "$ai"
-        mkdir -p "$HOME/.local/share/applications" "$HOME/.local/bin"
-        cat > "$HOME/.local/share/applications/anythingllm.desktop" <<DESK
-[Desktop Entry]
-Name=AnythingLLM
-Exec=$ai
-Icon=utilities-terminal
-Type=Application
-Categories=Office;AI;
-DESK
-        ln -sf "$ai" "$HOME/.local/bin/anythingllm"
-        OK "AnythingLLM installed."
-    else
-        WARN "Skipped AnythingLLM."
-    fi
+install_search_proxy() {
+    STEP "7/7 Search Proxy"
 
     # ── Search proxy ──────────────────────────────────────────────
     local PROXY_DIR="$INSTALL_DIR/search_proxy"
@@ -477,7 +697,13 @@ print_summary() {
     echo -e "${W}  Or use the manager:${N}"
     echo -e "  ${C}bash ~/ai_stack_manager.sh${N}"
     echo ""
+    echo -e "${W}  Test the API:${N}"
+    echo -e "  ${C}curl http://localhost:8080/v1/chat/completions \\"
+    echo -e "    -H 'Content-Type: application/json' \\"
+    echo -e "    -d '{\"model\":\"llama\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}]}'${N}"
+    echo ""
     WARN "Re-login (or reboot) before first use — required for Intel GPU group membership and oneAPI env."
+    sleep 5
 }
 
 # ================================================================
@@ -495,6 +721,7 @@ source "\$HOME/.cargo/env" 2>/dev/null || true
 export ONEAPI_DEVICE_SELECTOR="level_zero:0"
 export SYCL_DEVICE_FILTER="level_zero:gpu"
 export PATH="\$HOME/.cargo/bin:\$HOME/.local/bin:\$PATH"
+export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
 
 LLAMA_SERVER="$LLAMACPP_BIN"
 MODEL="$MODEL_PATH"
@@ -552,15 +779,59 @@ main() {
 
     preflight
     install_system_deps
+    configure_options
     install_intel_gpu_drivers
+    write_uninstall_script
     install_rust
     install_llamacpp_sycl
     download_model
     install_memu
-    install_anythingllm
+    install_search_proxy
     configure_shell
     write_startup_script
     print_summary
 }
 
-main "$@"
+# ================================================================
+#  ARG PARSER
+# ================================================================
+case "${1:-}" in
+    --update-llama)
+        update_llamacpp
+        exit 0
+        ;;
+
+    # ── Per-component installs — called by manager option 15 ──────
+    --component)
+        # Minimal environment for standalone component runs
+        [[ -f "$HOME/.cargo/env" ]] && source "$HOME/.cargo/env" 2>/dev/null || true
+        [[ -f /opt/intel/oneapi/setvars.sh ]] &&             source /opt/intel/oneapi/setvars.sh --force >/dev/null 2>&1 || true
+        export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+
+        case "${2:-}" in
+            llama)
+                install_system_deps
+                install_intel_gpu_drivers
+                install_rust
+                install_llamacpp_sycl
+                ;;
+            mem0)
+                install_memory_server
+                ;;
+            proxy)
+                # install_anythingllm now only installs the search proxy
+                install_anythingllm
+                ;;
+            *)
+                echo "Usage: $0 --component <llama|mem0|proxy>"
+                exit 1
+                ;;
+        esac
+        exit 0
+        ;;
+
+    *)
+        main "$@"
+        ;;
+esac
+

@@ -1,11 +1,17 @@
-# core/security_rag.py — SecurityValidator + RAGManager
+# core/security_rag.py — SecurityValidator + RAGManager (improved chunking + TF-IDF search)
 import json
+import math
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Tuple
 
-from core.config import SECURITY_CONFIG, RAG_DOCS_DIR, ADMIN_ALLOWED_EXTENSIONS, ADMIN_MAX_FILE_SIZE_MB
+from core.config import SECURITY_CONFIG, RAG_DOCS_DIR, APP_WORKSPACE
+
+
+# ============================================================================
+# SECURITY VALIDATOR
+# ============================================================================
 
 class SecurityValidator:
     @staticmethod
@@ -13,97 +19,105 @@ class SecurityValidator:
         issues = []
         for pat in SECURITY_CONFIG.BLOCKED_PATTERNS:
             if re.search(pat, code, re.IGNORECASE):
-                issues.append(f"Blocked pattern: {pat}")
+                issues.append(f"Blocked pattern: `{pat}`")
         for imp in ["os", "subprocess", "shutil", "sys", "ctypes", "pickle"]:
             if re.search(rf"\bimport\s+{imp}\b|\bfrom\s+{imp}\s+import", code):
-                issues.append(f"Dangerous import: {imp}")
+                issues.append(f"Potentially dangerous import: `{imp}`")
         return len(issues) == 0, issues
 
     @staticmethod
-    def sanitize(text: str, max_len: int = 10000) -> str:
+    def sanitize(text: str, max_len: int = 10_000) -> str:
         return "".join(c for c in text[:max_len] if c.isprintable() or c in "\n\t")
 
 
+# ============================================================================
+# RAG MANAGER — improved chunking + TF-IDF ranked search
+# ============================================================================
+
+_CHUNK_SIZE  = 400    # characters per chunk
+_CHUNK_OVER  = 80     # overlap between chunks
+
+def _chunk_text(text: str) -> List[str]:
+    """
+    Split text into overlapping chunks of ~_CHUNK_SIZE chars,
+    breaking at sentence/paragraph boundaries where possible.
+    """
+    chunks = []
+    start  = 0
+    while start < len(text):
+        end = min(start + _CHUNK_SIZE, len(text))
+        # Try to break at a sentence boundary
+        if end < len(text):
+            for sep in ("\n\n", "\n", ". ", "? ", "! ", " "):
+                pos = text.rfind(sep, start + _CHUNK_SIZE // 2, end)
+                if pos != -1:
+                    end = pos + len(sep)
+                    break
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        start = max(start + 1, end - _CHUNK_OVER)
+    return chunks
+
+
+def _tf_idf_score(query_terms: List[str], chunk: str,
+                  doc_freq: Dict[str, int], total_docs: int) -> float:
+    """
+    Lightweight TF-IDF: rewards chunks where query terms appear
+    frequently (TF) and are rare across all documents (IDF).
+    """
+    chunk_lower = chunk.lower()
+    score = 0.0
+    word_count = max(len(chunk_lower.split()), 1)
+    for term in query_terms:
+        tf  = chunk_lower.count(term) / word_count
+        df  = doc_freq.get(term, 1)
+        idf = math.log((total_docs + 1) / (df + 1)) + 1
+        score += tf * idf
+    return round(score, 6)
+
+
 class RAGManager:
+
+    # ── Ingest ───────────────────────────────────────────────────────────────
+
     @staticmethod
-    def process(file_path: Path, file_name: str,
-                is_admin: bool = False) -> Tuple[bool, str]:
-        """
-        Process an uploaded file for RAG.
-        is_admin=True  — any extension, 100 MB limit, binary fallback.
-        is_admin=False — respects ALLOWED_EXTENSIONS, 10 MB limit.
-        """
+    def process(file_path: Path, file_name: str) -> Tuple[bool, str]:
         try:
             suffix = file_path.suffix.lower()
-            max_mb = ADMIN_MAX_FILE_SIZE_MB if is_admin else 10
-            size_mb = file_path.stat().st_size / 1e6
-            if size_mb > max_mb:
-                return False, f"File too large ({size_mb:.1f} MB > {max_mb} MB)"
-            if not is_admin:
-                allowed = [e.lower() for e in SECURITY_CONFIG.ALLOWED_EXTENSIONS]
-                if suffix not in allowed:
-                    ext_list = ', '.join(allowed)
-                    return False, (
-                        f"Extension '{suffix}' not allowed. "
-                        f"Allowed: {ext_list}. Admin users can upload any type."
-                    )
             if suffix == ".pdf":
                 try:
                     import PyPDF2
                     with open(file_path, "rb") as f:
-                        content = "".join(
-                            p.extract_text() for p in PyPDF2.PdfReader(f).pages
+                        content = "\n".join(
+                            p.extract_text() or "" for p in PyPDF2.PdfReader(f).pages
                         )
-                    if not content.strip():
-                        content = "[PDF had no extractable text: " + file_name + "]"
                 except ImportError:
-                    content = "PyPDF2 not installed: pip install PyPDF2"
-            elif suffix == ".ipynb":
-                try:
-                    nb = json.loads(file_path.read_text(encoding="utf-8"))
-                    cells = []
-                    for cell in nb.get("cells", []):
-                        ct = cell.get("cell_type", "")
-                        src = "".join(cell.get("source", []))
-                        cells.append("[" + ct.upper() + "]" + "\n" + src)
-                    content = "\n\n".join(cells)
-                except Exception:
-                    content = file_path.read_text(encoding="utf-8", errors="ignore")
-            elif suffix in (".zip", ".tar", ".gz"):
-                import zipfile, tarfile
-                listing = []
-                try:
-                    if suffix == ".zip":
-                        with zipfile.ZipFile(file_path) as z:
-                            listing = z.namelist()
-                    else:
-                        with tarfile.open(file_path) as t:
-                            listing = t.getnames()
-                except Exception as ex:
-                    listing = ["Could not read archive: " + str(ex)]
-                content = "Archive: " + file_name + "\n" + "\n".join(listing)
+                    return False, "PyPDF2 not installed — run: pip install PyPDF2"
             else:
-                try:
-                    content = file_path.read_text(encoding="utf-8", errors="ignore")
-                except Exception:
-                    if is_admin:
-                        raw = file_path.read_bytes()
-                        content = "[Binary file - hex preview]\n" + raw[:2048].hex()
-                    else:
-                        raise
-            out  = RAG_DOCS_DIR / (file_name + ".txt")
-            meta = RAG_DOCS_DIR / (file_name + ".meta.json")
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+
+            if not content.strip():
+                return False, "File appears to be empty or contains no extractable text"
+
+            # Chunk and store
+            chunks = _chunk_text(content)
+            out    = RAG_DOCS_DIR / f"{file_name}.txt"
+            meta   = RAG_DOCS_DIR / f"{file_name}.meta.json"
             out.write_text(content, encoding="utf-8")
             meta.write_text(json.dumps({
-                "filename":  file_name,
-                "uploaded":  datetime.now().isoformat(),
-                "size":      len(content),
-                "path":      str(out),
-                "is_admin":  is_admin,
+                "filename":    file_name,
+                "uploaded":    datetime.now().isoformat(),
+                "size":        len(content),
+                "chunk_count": len(chunks),
+                "path":        str(out),
+                "suffix":      suffix,
             }, indent=2))
-            return True, f"{len(content):,} chars"
+            return True, f"{len(content):,} chars  ·  {len(chunks)} chunks"
         except Exception as e:
             return False, str(e)
+
+    # ── List / delete ─────────────────────────────────────────────────────────
 
     @staticmethod
     def list_docs() -> List[Dict]:
@@ -113,25 +127,9 @@ class RAGManager:
         )
 
     @staticmethod
-    def search(query: str, max_results: int = 3,
-               full_content: bool = False) -> List[Dict]:
-        """max_results up to 50 for admin. full_content=True returns full doc text."""
-        q, results = query.lower(), []
-        for doc in RAG_DOCS_DIR.glob("*.txt"):
-            try:
-                content = doc.read_text(encoding="utf-8")
-                score   = content.lower().count(q)
-                if score:
-                    idx  = content.lower().find(q)
-                    s, e = max(0, idx - 250), min(len(content), idx + 250)
-                    ctx  = ("..." if s else "") + content[s:e] + ("..." if e < len(content) else "")
-                    results.append({"filename": doc.stem, "score": score,
-                                    "context": ctx,
-                                    "full_content": content if full_content else ""})
-            except Exception:
-                pass
-        results.sort(key=lambda x: x["score"], reverse=True)
-        return results[:max_results]
+    def get_content(filename: str) -> str:
+        p = RAG_DOCS_DIR / f"{filename}.txt"
+        return p.read_text(encoding="utf-8") if p.exists() else ""
 
     @staticmethod
     def delete(filename: str):
@@ -140,37 +138,67 @@ class RAGManager:
             if p.exists():
                 p.unlink()
 
-
-# ============================================================================
-# STREAMLIT CONFIG
-# ============================================================================
+    # ── Search ────────────────────────────────────────────────────────────────
 
     @staticmethod
-    def bulk_delete(filenames: List[str]) -> Tuple[int, int]:
-        """Delete multiple docs. Returns (deleted, failed)."""
-        ok_n = fail_n = 0
-        for filename in filenames:
-            try:
-                for sfx in (".txt", ".meta.json"):
-                    p = RAG_DOCS_DIR / (filename + sfx)
-                    if p.exists():
-                        p.unlink()
-                ok_n += 1
-            except Exception:
-                fail_n += 1
-        return ok_n, fail_n
+    def search(query: str, max_results: int = 5) -> List[Dict]:
+        """
+        TF-IDF ranked search across all RAG documents.
+        Returns list of {filename, score, context, chunk_idx} dicts,
+        sorted by relevance descending.
+        """
+        if not query.strip():
+            return []
 
-    @staticmethod
-    def reindex_all(is_admin: bool = False) -> Tuple[int, int]:
-        """Re-touch metadata timestamps on all stored docs. Returns (ok, failed)."""
-        ok_n = fail_n = 0
-        for meta_file in RAG_DOCS_DIR.glob("*.meta.json"):
-            try:
-                meta = json.loads(meta_file.read_text())
-                meta["re_indexed"] = datetime.now().isoformat()
-                meta_file.write_text(json.dumps(meta, indent=2))
-                ok_n += 1
-            except Exception:
-                fail_n += 1
-        return ok_n, fail_n
+        # Tokenise query: lowercase words of 3+ chars
+        query_terms = [t for t in re.split(r'\W+', query.lower()) if len(t) >= 3]
+        if not query_terms:
+            # Short query — fall back to substring match
+            query_terms = [query.lower()]
 
+        # Build document-frequency map (per whole document)
+        docs = list(RAG_DOCS_DIR.glob("*.txt"))
+        total_docs = len(docs)
+        if total_docs == 0:
+            return []
+
+        doc_freq: Dict[str, int] = {}
+        doc_texts: Dict[str, str] = {}
+        for doc in docs:
+            try:
+                text = doc.read_text(encoding="utf-8")
+                doc_texts[str(doc)] = text
+                text_lower = text.lower()
+                for term in query_terms:
+                    if term in text_lower:
+                        doc_freq[term] = doc_freq.get(term, 0) + 1
+            except Exception:
+                pass
+
+        # Score every chunk of every document
+        results = []
+        for doc_path, content in doc_texts.items():
+            stem = Path(doc_path).stem   # e.g. "report.pdf"
+            chunks = _chunk_text(content)
+            for i, chunk in enumerate(chunks):
+                score = _tf_idf_score(query_terms, chunk, doc_freq, total_docs)
+                if score > 0:
+                    results.append({
+                        "filename":  stem,
+                        "score":     score,
+                        "context":   chunk,
+                        "chunk_idx": i,
+                        "total_chunks": len(chunks),
+                    })
+
+        # Sort by score, deduplicate (keep best chunk per doc), return top N
+        results.sort(key=lambda x: x["score"], reverse=True)
+        seen_files: set = set()
+        deduped = []
+        for r in results:
+            # Allow up to 2 chunks per document in top results
+            key = (r["filename"], r["chunk_idx"] // 3)
+            if key not in seen_files:
+                seen_files.add(key)
+                deduped.append(r)
+        return deduped[:max_results]
