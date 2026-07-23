@@ -294,6 +294,7 @@ start_stack() {
         --port          "$ENGINE_PORT"
         --host          "$visible2network"
         --api-key       local
+        --tool all
     )
     # Only pass --flash-attn if enabled (avoids errors on older builds)
     [[ "$flash_attention" == "1" ]] && ENGINE_CMD+=(--flash-attn)
